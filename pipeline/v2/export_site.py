@@ -127,9 +127,10 @@ def exporter_pays(dossier, site):
                  on=["pays", "annee", "mois"], how="left")
     out = {}
     r = lambda x: [None if pd.isna(v) else round(float(v), 2) for v in x]
+    txt = lambda v: None if pd.isna(v) else str(v)   # countries without calibration (e.g. Monaco): null, never NaN
     for p, g in d.sort_values(["pays", "annee", "mois"]).groupby("pays"):
-        out[p] = {"sous_region": g["sous_region"].iloc[0], "fiabilite": g["fiabilite"].iloc[0],
-                  "fiabilite_frp": g["fiabilite_frp"].iloc[0] if "fiabilite_frp" in g else None,
+        out[p] = {"sous_region": txt(g["sous_region"].iloc[0]), "fiabilite": txt(g["fiabilite"].iloc[0]),
+                  "fiabilite_frp": txt(g["fiabilite_frp"].iloc[0]) if "fiabilite_frp" in g else None,
                   "premier_mois": f"{int(g['annee'].iloc[0])}-{int(g['mois'].iloc[0]):02d}",
                   "hotspots": r(g["valeur"]), "bas_80": r(g["bas_80"]), "haut_80": r(g["haut_80"]),
                   "bas_95": r(g["bas_95"]), "haut_95": r(g["haut_95"]),
@@ -137,7 +138,7 @@ def exporter_pays(dossier, site):
                   "couverture_jours": r(g["couverture_jours"])}
     ch = os.path.join(site, "pays.json")
     with open(ch, "w", encoding="utf-8") as fo:
-        json.dump(out, fo, ensure_ascii=False, separators=(",", ":"))
+        json.dump(out, fo, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return sc, os.path.getsize(ch)
 
 
@@ -159,7 +160,7 @@ def exporter_incertitude(dossier, site):
                                      "couverture_observee": s["couverture"]}
     ch = os.path.join(site, "incertitude.json")
     with open(ch, "w", encoding="utf-8") as f:
-        json.dump(inc, f, ensure_ascii=False, indent=1)
+        json.dump(inc, f, ensure_ascii=False, indent=1, allow_nan=False)
     return rc, rf
 
 
@@ -211,7 +212,7 @@ def main(argv=None):
              "tailles_octets": {"h3_mois": tailles["mois"], "h3_tuiles": tailles["tuiles"], "pays_json": t_pays, "points_grece": t_pts},
              "points_grece": n_pts}
     with open(os.path.join(site, "index.json"), "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=1, default=str)
+        json.dump(index, f, ensure_ascii=False, indent=1, default=str, allow_nan=False)
     mo = 1e6
     print(f"H3 5 : {len(mois)} mois -> {tailles['mois'] / mo:.1f} Mo ; {len(tuiles)} tuiles -> {tailles['tuiles'] / mo:.1f} Mo")
     print(f"pays.json : {t_pays / mo:.1f} Mo ; points Grece : {n_pts:,} points -> {t_pts / mo:.1f} Mo")
