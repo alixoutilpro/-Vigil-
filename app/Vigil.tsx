@@ -1839,9 +1839,9 @@ const CSS = `
 
 .hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
   background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
-.hd-panel-left{position:absolute;left:12px;top:70px;bottom:100px;z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
+.hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
   background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
-.hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 14px;display:flex;flex-direction:column;gap:0}
+.hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
 .hd-panel-left .hd-region-card{border-bottom:0}
 .hd-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
 .hd-name{font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
@@ -1917,7 +1917,7 @@ const CSS = `
 .maplibregl-ctrl-bottom-right{bottom:0}
 
 /* ── Region Card ── */
-.hd-region-card{display:flex;flex-direction:column;gap:10px;padding:10px 14px 12px;border-bottom:1px solid var(--bd)}
+.hd-region-card{display:flex;flex-direction:column;gap:10px;padding:6px 14px 10px;border-bottom:1px solid var(--bd)}
 .hd-rc-titlerow{display:flex;align-items:center;gap:8px;min-height:26px}
 .hd-rc-nameinput{flex:1;background:transparent;border:1px solid var(--or);border-radius:5px;padding:3px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--tx);outline:none;min-width:0}
 .hd-rc-rename{margin-left:auto;border:0;background:transparent;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--mut);padding:3px 7px;border-radius:5px;white-space:nowrap;flex-shrink:0}
