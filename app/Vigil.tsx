@@ -3,87 +3,37 @@
 /**
  * Vigil - MODIS / VIIRS hotspot harmonization. Map-first single-file component.
  * Map: MapLibre GL (globe / 2D plan), Esri satellite imagery.
- * Single source of truth: data/data.json (pipeline v2 export, one row per 0.25 deg cell x month,
- * hotspot COUNTS). The calendar, the map points and the CSV export are all built from it, so they
- * always agree. Outside the area covered by data.json the app shows "no data", never invented fires.
+ * Data: contract v2 (docs/contrat_donnees_v2.md), static files of `python -m pipeline.v2.export_site`
+ * served at /data (app/donnees.ts). Nothing is bundled: index.json + incertitude.json at start, the
+ * month map, the H3 tiles of a zone and pays.json on demand.
+ * - Map without selection: H3 res-5 hexagons of the month shown (h3_5/mois/YYYY-MM.bin.gz).
+ * - Zone (box, polygon, coordinates): sum of the hexagons whose centre is inside (h3_5/tuiles), then the
+ *   band of incertitude.json (hotspots_sous_pays) on the zone total.
+ * - Country (search): validated country x month series of pays.json, with its reliability.
+ * Calendar, map and CSV export of a zone come from the same hexagons, so they agree.
  */
 
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
-import contractData from "../data/data.json";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
+import {
+  BASE, ErreurDonnees, centreHex, chargerIncertitude, chargerIndex, chargerMois, chargerPays, chargerTuile,
+  cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
+  type HexMois, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type Tuile,
+} from "./donnees";
+import { serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Types & constants                                                          */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-type Variant = "raw" | "harm";
-type Metric = "count" | "frp";
-type FireType = "all" | "wild" | "agri";
-type V3 = [number, number, number];
-type Ring = [number, number][];
-
-interface AnomalyDef {
-  y: number;
-  m: number[];
-  k: number;
-}
-
 export interface RegionDef {
   id: string;
   name: string;
-  lat: number;
-  lon: number;
   /** [latMin, latMax, lonMin, lonMax] */
   bbox: [number, number, number, number];
-  scale: number;
-  peak: number;
-  width: number;
-  floor: number;
-  ext: number;
-  earlier: number;
-  trend: number;
-  wild: number;
-  frp: number;
-  anomalies: AnomalyDef[];
-  color: string;
-  custom?: boolean;
-}
-
-export interface Cell {
-  y: number;
-  m: number;
-  modis: number;
-  viirs: number;
-  mFrp: number;
-  vFrp: number;
-  mEff: number; // MODIS coverage efficiency (Terra-only era = 0.6)
-  hasV: boolean;
-  wild: number;
-  /** Harmonized total from the pillar 6 contract (sum of harmonized_fire_days); overrides the nominal-ratio conversion. */
-  harm?: number;
-}
-
-/** One row of data/data.json — the frozen pillar 6 output contract. */
-interface ContractRow {
-  cell_id: string;
-  lat: number;
-  lon: number;
-  iso_year: number;
-  iso_week: number;
-  modis_fire_days: number | null;
-  viirs_fire_days: number | null;
-  harmonized_fire_days: number;
-  harmonized_low: number;
-  harmonized_high: number;
-  land_cover_class: "forest" | "cropland" | "shrub_grass" | "other";
-  source: "modis_only" | "viirs_converted" | "both";
-}
-
-interface CellVal {
-  total: number;
-  modis: number;
-  viirs: number;
+  /** FIRMS country key of pays.json (country mode). */
+  pays?: string;
 }
 
 interface DateRange {
@@ -91,62 +41,15 @@ interface DateRange {
   to: { y: number; m: number };
 }
 
-const Y0 = 2000;
-const Y1 = 2026;
-const NY = Y1 - Y0 + 1;
-const LAST_MONTH_Y1 = 9; // data through Oct 2026
-const FIRST_MONTH_Y0 = 10; // MODIS active fire starts Nov 2000
-const VIIRS_START = { y: 2012, m: 1 }; // Feb 2012
-const R_NOM = 2.5; // nominal VIIRS(375m)/MODIS(1km) pixel-count ratio used for harmonization
-const VFRP_BIAS = 1.12; // nominal VIIRS FRP sensitivity bias
+/** First and last month of the export (from index.json). */
+interface Bornes { first: { y: number; m: number }; last: { y: number; m: number } }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-const D2R = Math.PI / 180;
+/** Below this number of hexagons a drawn zone is smaller than the zones the band was tested on. */
+const MIN_HEX_FOURCHETTE = 3;
 
-export const REGIONS: RegionDef[] = [
-  {
-    id: "med", name: "Mediterranean Basin", lat: 38, lon: 15, bbox: [30, 46, -10, 36],
-    scale: 1800, peak: 7.3, width: 1.35, floor: 0.04, ext: 0.32, earlier: 0.45, trend: 0.012,
-    wild: 0.62, frp: 22, color: "#ea580c",
-    anomalies: [{ y: 2007, m: [6, 7], k: 1.9 }, { y: 2021, m: [6, 7], k: 2.2 }, { y: 2026, m: [6, 7, 8], k: 2.9 }],
-  },
-  {
-    id: "cal", name: "California", lat: 37, lon: -120, bbox: [32, 42.5, -124.5, -114],
-    scale: 900, peak: 8.6, width: 1.5, floor: 0.05, ext: 0.4, earlier: 0.5, trend: 0.015,
-    wild: 0.85, frp: 38, color: "#dc2626",
-    anomalies: [{ y: 2018, m: [7, 8, 10], k: 2.4 }, { y: 2020, m: [7, 8, 9], k: 2.9 }, { y: 2021, m: [7, 8], k: 1.8 }],
-  },
-  {
-    id: "amz", name: "Amazon", lat: -8, lon: -60, bbox: [-18, 5, -74, -46],
-    scale: 6000, peak: 8.6, width: 1.15, floor: 0.06, ext: 0.25, earlier: 0.25, trend: 0.006,
-    wild: 0.35, frp: 30, color: "#f97316",
-    anomalies: [{ y: 2005, m: [7, 8, 9], k: 1.9 }, { y: 2010, m: [7, 8, 9], k: 2.1 }, { y: 2019, m: [7, 8], k: 1.9 }, { y: 2024, m: [7, 8, 9], k: 2.3 }],
-  },
-  {
-    id: "aus", name: "Australia", lat: -25, lon: 135, bbox: [-39, -10, 113, 154],
-    scale: 3500, peak: 10.6, width: 1.7, floor: 0.07, ext: 0.3, earlier: 0.4, trend: 0.008,
-    wild: 0.75, frp: 26, color: "#ea580c",
-    anomalies: [{ y: 2019, m: [8, 9, 10, 11], k: 2.5 }, { y: 2020, m: [0], k: 2.4 }, { y: 2023, m: [9, 10], k: 1.7 }],
-  },
-  {
-    id: "pam", name: "Argentine Pampas & Patagonia", lat: -36, lon: -64, bbox: [-42, -30, -75, -55],
-    scale: 1400, peak: 8.4, width: 1.3, floor: 0.05, ext: 0.3, earlier: 0.3, trend: 0.008,
-    wild: 0.4, frp: 22, color: "#f97316",
-    anomalies: [{ y: 2022, m: [0, 1, 2], k: 2.2 }],
-  },
-  {
-    id: "afr", name: "Sub-Saharan Africa", lat: 0, lon: 15, bbox: [-15, 15, -8, 38],
-    scale: 9000, peak: 0.8, width: 1.6, floor: 0.08, ext: 0.2, earlier: 0.2, trend: 0.004,
-    wild: 0.3, frp: 24, color: "#ea580c", anomalies: [],
-  },
-  {
-    id: "sea", name: "Southeast Asia", lat: 10, lon: 106, bbox: [-3, 24, 95, 118],
-    scale: 3000, peak: 2.8, width: 1.2, floor: 0.06, ext: 0.25, earlier: 0.3, trend: 0.006,
-    wild: 0.45, frp: 20, color: "#dc2626",
-    anomalies: [{ y: 2015, m: [8, 9], k: 2.4 }, { y: 2019, m: [8, 9], k: 2.0 }],
-  },
-];
+/** A zone with its series and the tiles it was computed from (map and CSV reuse them). */
+interface ZoneChargee { region: RegionDef; serie: SerieZone; tuiles: Tuile[] }
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Country search data  [latMin, latMax, lonMin, lonMax]                       */
@@ -298,34 +201,12 @@ const COUNTRIES: Array<{ name: string; bbox: [number, number, number, number] }>
   { name: "Zimbabwe", bbox: [-22.4, -15.6, 25.2, 33.1] },
 ];
 
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Utilities                                                                  */
 /* ────────────────────────────────────────────────────────────────────────── */
 
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
-
-function hashStr(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-function mulberry32(a: number) {
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-function gauss(r: () => number) {
-  const u = Math.max(r(), 1e-9);
-  const v = r();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
 
 const fmtLat = (v: number) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? "N" : "S"}`;
 const fmtLon = (v: number) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? "E" : "W"}`;
@@ -338,293 +219,30 @@ function fmtCompact(n: number): string {
   if (a >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(Math.round(n));
 }
-const unit = (m: Metric) => (m === "count" ? "px" : "MW");
+/** Value with one decimal under 10 (converted totals are not integers). */
+const fmtVal = (n: number) => (Math.abs(n) < 10 && n % 1 ? n.toFixed(1) : fmtInt(n));
+const unit = (m: Metrique) => (m === "hotspots" ? "detections" : "MW");
+const LIB_FIAB: Record<string, string> = { elevee: "high", moyenne: "medium", faible: "low" };
 
-function lonLatVec(lon: number, lat: number): V3 {
-  const l = lon * D2R;
-  const p = lat * D2R;
-  return [Math.cos(p) * Math.sin(l), Math.sin(p), Math.cos(p) * Math.cos(l)];
+/** FIRMS country key (pays.json) of a display name: same letters once "_", "the", "of", "and" are ignored. */
+const normPays = (s: string) => s.toLowerCase().replace(/[_\-'’]/g, " ").replace(/\b(the|of|and)\b/g, "").replace(/[^a-z]/g, "");
+const ALIAS_PAYS: Record<string, string[]> = {
+  "Ivory Coast": ["Cote_d'Ivoire", "Côte_d'Ivoire", "Cote_dIvoire"],
+  "Czech Republic": ["Czechia"],
+  "Democratic Republic of Congo": ["Democratic_Republic_of_the_Congo"],
+  "Congo": ["Republic_of_the_Congo", "Republic_of_Congo"],
+  "United States": ["United_States_of_America", "USA"],
+  "Russia": ["Russian_Federation"],
+  "Turkey": ["Turkiye", "Türkiye"],
+  "North Macedonia": ["Macedonia"],
+  "Laos": ["Lao_PDR", "Lao_People's_Democratic_Republic"],
+};
+function clePays(nom: string, pays: PaysV2 | null): string | undefined {
+  if (!pays) return undefined;
+  if (pays[nom.replace(/ /g, "_")]) return nom.replace(/ /g, "_");
+  const voulus = [nom, ...(ALIAS_PAYS[nom] ?? [])].map(normPays);
+  return Object.keys(pays).find((k) => voulus.includes(normPays(k)));
 }
-function angDist(lon1: number, lat1: number, lon2: number, lat2: number): number {
-  const a = lonLatVec(lon1, lat1);
-  const b = lonLatVec(lon2, lat2);
-  return Math.acos(clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1, 1)) / D2R;
-}
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Mock data generation                                                       */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-export function makeCustomRegion(lat: number, lon: number): RegionDef {
-  const la = Math.round(lat * 10) / 10;
-  const lo = Math.round(lon * 10) / 10;
-  const id = `custom:${la},${lo}`;
-  const rng = mulberry32(hashStr(id));
-  const a = Math.abs(la);
-  const peak = la >= 0 ? (a > 45 ? 6.9 : a > 20 ? 7.9 : 8.4) : a > 20 ? 10.6 : 8.8;
-  const pm = Math.round(peak - 0.5);
-  const anomalies: AnomalyDef[] = [{ y: 2010 + Math.floor(rng() * 10), m: [pm, (pm + 1) % 12], k: 1.8 + rng() * 0.6 }];
-  if (rng() < 0.55) {
-    anomalies.push(pm > 8 ? { y: 2025, m: [10, 11], k: 2.4 + rng() } : { y: 2026, m: [pm - 1, pm], k: 2.4 + rng() });
-  }
-  return {
-    id, custom: true,
-    name: `Custom ${fmtLat(la)} ${fmtLon(lo)}`,
-    lat: la, lon: lo,
-    bbox: [clamp(la - 8, -90, 90), clamp(la + 8, -90, 90), lo - 10, lo + 10],
-    scale: 600 + rng() * 3000, peak, width: 1.1 + rng() * 0.6, floor: 0.04,
-    ext: 0.2 + rng() * 0.2, earlier: 0.2 + rng() * 0.3, trend: 0.004 + rng() * 0.01,
-    wild: 0.4 + rng() * 0.4, frp: 18 + rng() * 20, anomalies, color: "#dc2626",
-  };
-}
-
-/* ── Pillar 6 contract → monthly cells ───────────────────────────────────── */
-
-const CONTRACT = contractData as unknown as ContractRow[];
-const WILD_BY_LC: Record<ContractRow["land_cover_class"], number> = { forest: 0.85, shrub_grass: 0.85, cropland: 0.15, other: 0.5 };
-
-/** Month index (0-11) and year of the Thursday of an ISO week (ISO year / month attribution). */
-function isoWeekMonth(isoYear: number, isoWeek: number): { y: number; m: number } {
-  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
-  const dow = jan4.getUTCDay() || 7;
-  const thu = new Date(Date.UTC(isoYear, 0, 4 + (isoWeek - 1) * 7 + (4 - dow)));
-  return { y: thu.getUTCFullYear(), m: thu.getUTCMonth() };
-}
-
-let CONTRACT_END: { y: number; m: number } | null = null;
-function contractEnd() {
-  if (CONTRACT_END) return CONTRACT_END;
-  let best = { y: 0, m: 0 };
-  for (const r of CONTRACT) {
-    const k = isoWeekMonth(r.iso_year, r.iso_week);
-    if (k.y > best.y || (k.y === best.y && k.m > best.m)) best = k;
-  }
-  return (CONTRACT_END = best);
-}
-
-/** Area and period covered by data/data.json (cells are CELL_DEG wide, lat/lon = cell centre). */
-interface Coverage { la0: number; la1: number; lo0: number; lo1: number; first: { y: number; m: number }; last: { y: number; m: number } }
-let COVERAGE: Coverage | null = null;
-function cellDeg(): number {
-  const lats = Array.from(new Set(CONTRACT.map((c) => c.lat))).sort((a, b) => a - b);
-  let gap = Infinity;
-  for (let i = 1; i < lats.length; i++) gap = Math.min(gap, lats[i] - lats[i - 1]);
-  return Number.isFinite(gap) && gap > 0 ? Math.round(gap * 1000) / 1000 : 0.25;
-}
-const CELL_DEG = cellDeg();
-function coverage(): Coverage | null {
-  if (COVERAGE || !CONTRACT.length) return COVERAGE;
-  const h = CELL_DEG / 2;
-  let la0 = 90, la1 = -90, lo0 = 180, lo1 = -180, first = { y: 9999, m: 0 };
-  for (const c of CONTRACT) {
-    la0 = Math.min(la0, c.lat - h); la1 = Math.max(la1, c.lat + h);
-    lo0 = Math.min(lo0, c.lon - h); lo1 = Math.max(lo1, c.lon + h);
-    const k = isoWeekMonth(c.iso_year, c.iso_week);
-    if (k.y < first.y || (k.y === first.y && k.m < first.m)) first = k;
-  }
-  return (COVERAGE = { la0, la1, lo0, lo1, first, last: contractEnd() });
-}
-/** True when the bbox [la0, la1, lo0, lo1] overlaps the area covered by data.json. */
-export function overlapsCoverage(b: [number, number, number, number]): boolean {
-  const cv = coverage();
-  return !!cv && b[0] < cv.la1 && b[1] > cv.la0 && b[2] < cv.lo1 && b[3] > cv.lo0;
-}
-/** True when the bbox lies entirely inside the area covered by data.json. */
-export function insideCoverage(b: [number, number, number, number]): boolean {
-  const cv = coverage();
-  return !!cv && b[0] >= cv.la0 && b[1] <= cv.la1 && b[2] >= cv.lo0 && b[3] <= cv.lo1;
-}
-
-/** Rows of data.json whose cell centre is inside the region (bbox, then drawn polygon if any). */
-function contractRows(bbox: [number, number, number, number] | null, ring?: Ring): ContractRow[] {
-  if (!bbox) return CONTRACT;
-  const [la0, la1, lo0, lo1] = bbox;
-  return CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1 && (!ring || pip(c.lon, c.lat, ring)));
-}
-
-/**
- * Monthly cells of a region, from data/data.json only.
- * - Region outside the covered area: every month is null ("no data"), never a synthetic series.
- * - Inside: months of the covered period are summed over the cells in the region; a month without
- *   a row is a real 0 (the export only writes cell-months with at least one detection).
- */
-function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
-  const cv = coverage();
-  const empty = () => Array.from({ length: NY }, () => Array.from({ length: 12 }, (): Cell | null => null));
-  if (!cv || !overlapsCoverage(r.bbox)) return empty();
-  const acc = Array.from({ length: NY }, () =>
-    Array.from({ length: 12 }, () => ({ modis: 0, viirs: 0, harm: 0, wild: 0 })));
-  for (const c of contractRows(r.bbox, ring)) {
-    const k = isoWeekMonth(c.iso_year, c.iso_week);
-    if (k.y < Y0 || k.y > Y1) continue;
-    const a = acc[k.y - Y0][k.m];
-    a.modis += c.modis_fire_days ?? 0;
-    a.viirs += c.viirs_fire_days ?? 0;
-    a.harm += c.harmonized_fire_days;
-    a.wild += c.harmonized_fire_days * WILD_BY_LC[c.land_cover_class];
-  }
-  const { first, last } = cv;
-  return acc.map((row, yi) =>
-    row.map((a, m): Cell | null => {
-      const y = Y0 + yi;
-      if (y < first.y || (y === first.y && m < first.m) || y > last.y || (y === last.y && m > last.m)) return null;
-      const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
-      return {
-        y, m, modis: a.modis, viirs: a.viirs,
-        // FRP is not part of the contract: approximate from the region's mean FRP per hotspot.
-        mFrp: Math.round(a.modis * r.frp), vFrp: Math.round(a.viirs * r.frp * VFRP_BIAS),
-        mEff: 1, hasV, wild: a.harm > 0 ? a.wild / a.harm : r.wild, harm: a.harm,
-      };
-    }));
-}
-
-/** Value of a cell for a given harmonization variant / metric / fire-type filter. */
-export function cellStats(c: Cell, variant: Variant, metric: Metric, type: FireType): CellVal {
-  let m = metric === "count" ? c.modis : c.mFrp;
-  let v = metric === "count" ? c.viirs : c.vFrp;
-  if (variant === "harm" && metric === "count" && c.harm !== undefined) {
-    // Contract data: harmonized_fire_days already MODIS-equivalent; sensors shown as observed.
-    const f = type === "all" ? 1 : type === "wild" ? c.wild : 1 - c.wild;
-    return { total: c.harm * f, modis: m * f, viirs: v * f };
-  }
-  if (variant === "harm") {
-    m = m / c.mEff;
-    v = metric === "count" ? v / R_NOM : v / VFRP_BIAS;
-  }
-  let total = variant === "raw" ? m + v : c.hasV ? (m + v) / 2 : m;
-  let f = 1;
-  if (type !== "all") {
-    const w =
-      metric === "count" ? c.wild : (c.wild * 1.3) / (c.wild * 1.3 + (1 - c.wild) * 0.7);
-    f = type === "wild" ? w : 1 - w;
-  }
-  total *= f;
-  return { total, modis: m * f, viirs: v * f };
-}
-
-function monthlyValues(data: (Cell | null)[][], variant: Variant, metric: Metric, type: FireType): (CellVal | null)[][] {
-  return data.map((row) => row.map((c) => (c ? cellStats(c, variant, metric, type) : null)));
-}
-
-interface AnnualPt {
-  value: number | null;
-  est: boolean;
-}
-function annualSeries(vals: (CellVal | null)[][]): AnnualPt[] {
-  const sums = vals.map((r) => r.reduce((a, c) => a + (c ? c.total : 0), 0));
-  const isFull = vals.map((r) => r.every((c) => c !== null));
-  return vals.map((row, yi) => {
-    if (isFull[yi]) return { value: sums[yi], est: false };
-    const obsMonths = row.map((c, m) => (c ? m : -1)).filter((m) => m >= 0);
-    const ratios: number[] = [];
-    vals.forEach((r2, yj) => {
-      if (!isFull[yj] || sums[yj] <= 0) return;
-      ratios.push(obsMonths.reduce((a, m) => a + (r2[m] as CellVal).total, 0) / sums[yj]);
-    });
-    const frac = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : 0;
-    if (frac < 0.2) return { value: null, est: true };
-    return { value: sums[yi] / frac, est: true };
-  });
-}
-
-/* ── Season metrics ───────────────────────────────────────────────────────── */
-
-const MID_DOY = DAYS.map((d, i) => DAYS.slice(0, i).reduce((a, b) => a + b, 0) + d / 2);
-
-function dailyCurve(v: number[]): number[] {
-  const out: number[] = new Array(365);
-  for (let d = 0; d < 365; d++) {
-    let a: number, ma: number, mb: number;
-    if (d < MID_DOY[0]) {
-      a = 11; ma = MID_DOY[11] - 365; mb = MID_DOY[0];
-    } else {
-      a = 0;
-      for (let i = 0; i < 12; i++) if (MID_DOY[i] <= d) a = i;
-      ma = MID_DOY[a];
-      mb = a === 11 ? MID_DOY[0] + 365 : MID_DOY[a + 1];
-    }
-    const b = (a + 1) % 12;
-    const f = (d - ma) / (mb - ma);
-    out[d] = v[a] * (1 - f) + v[b] * f;
-  }
-  return out;
-}
-
-function climatology(vals: (CellVal | null)[][], y0: number, y1: number): number[] {
-  return Array.from({ length: 12 }, (_, m) => {
-    let s = 0, n = 0;
-    for (let y = y0; y <= y1; y++) {
-      const c = vals[y - Y0][m];
-      if (c) { s += c.total; n++; }
-    }
-    return n ? s / n : 0;
-  });
-}
-
-export interface SeasonKpi {
-  extensionDays: number;
-  onsetWeeks: number;
-  lenEarly: number;
-  lenLate: number;
-  saturated: boolean;
-}
-export function seasonKpi(vals: (CellVal | null)[][]): SeasonKpi {
-  const early = dailyCurve(climatology(vals, 2000, 2004));
-  const late = dailyCurve(climatology(vals, 2021, 2025));
-  let minDay = 0;
-  for (let i = 1; i < 365; i++) if (early[i] < early[minDay]) minDay = i;
-  const mn = Math.min(...early);
-  const mx = Math.max(...early);
-  const thr = mn + 0.3 * (mx - mn);
-  const stat = (d: number[]) => {
-    let len = 0, onset = -1;
-    for (let i = 0; i < 365; i++) {
-      if (d[(minDay + i) % 365] >= thr) { len++; if (onset < 0) onset = i; }
-    }
-    return { len, onset: onset < 0 ? 0 : onset };
-  };
-  const e = stat(early);
-  const l = stat(late);
-  return {
-    extensionDays: l.len - e.len,
-    onsetWeeks: (e.onset - l.onset) / 7,
-    lenEarly: e.len, lenLate: l.len,
-    saturated: l.len >= 360,
-  };
-}
-
-export interface AnomalyResult { z: number; y: number; m: number; value: number; mean: number; sd: number }
-export function anomalyScan(vals: (CellVal | null)[][]): AnomalyResult | null {
-  let best: AnomalyResult | null = null;
-  for (let k = 11; k >= 0; k--) {
-    let y = Y1, m = LAST_MONTH_Y1 - k;
-    if (m < 0) { m += 12; y -= 1; }
-    const cur = vals[y - Y0][m];
-    if (!cur) continue;
-    const base: number[] = [];
-    for (let by = 2000; by <= 2010; by++) { const c = vals[by - Y0][m]; if (c) base.push(c.total); }
-    if (base.length < 5) continue;
-    const mean = base.reduce((a, b) => a + b, 0) / base.length;
-    const sd0 = Math.sqrt(base.reduce((a, b) => a + (b - mean) ** 2, 0) / (base.length - 1));
-    const sd = Math.max(sd0, mean * 0.3);
-    if (sd <= 0) continue;
-    const z = (cur.total - mean) / sd;
-    if (!best || Math.abs(z) > Math.abs(best.z)) best = { z, y, m, value: cur.total, mean, sd };
-  }
-  return best;
-}
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Map points: one per data.json cell                                         */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-interface HotFeature {
-  type: "Feature";
-  geometry: { type: "Point"; coordinates: [number, number] };
-  /** n = value shown (raw: MODIS + VIIRS, harmonized: harmonized count), same rule as the calendar. */
-  properties: { n: number; modis: number; viirs: number; harm: number; cell: string; period: string };
-}
-type HotCollection = { type: "FeatureCollection"; features: HotFeature[] };
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Geometry helpers                                                           */
@@ -634,76 +252,98 @@ const rectRing = (b: [number, number, number, number]): Ring => {
   const [la0, la1, lo0, lo1] = b;
   return [[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]];
 };
-function pip(x: number, y: number, ring: Ring): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const [xi, yi] = ring[i], [xj, yj] = ring[j];
-    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
 function regionFromRing(ring: Ring): RegionDef {
   const lons = ring.map((p) => p[0]), lats = ring.map((p) => p[1]);
-  const lonMin = Math.min(...lons), lonMax = Math.max(...lons), latMin = Math.min(...lats), latMax = Math.max(...lats);
-  const base = makeCustomRegion((latMin + latMax) / 2, (lonMin + lonMax) / 2);
-  const area = (latMax - latMin) * (lonMax - lonMin);
-  return {
-    ...base, name: "Custom Selection", bbox: [latMin, latMax, lonMin, lonMax],
-    scale: base.scale * clamp(Math.sqrt(area / 320), 0.4, 3),
-  };
+  const bbox: [number, number, number, number] = [Math.min(...lats), Math.max(...lats), Math.min(...lons), Math.max(...lons)];
+  return { id: `zone:${bbox.map((v) => v.toFixed(2)).join(",")}`, name: "Custom Selection", bbox };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/* Points and CSV export, both from data/data.json                            */
+/* Hexagon map and CSV export                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
 
 const MORPH_MS = 1100; // globe <-> plan animation
 const monthKey = (y: number, m: number) => y * 12 + m;
-const ym = (k: number) => `${Math.floor(k / 12)}-${String((k % 12) + 1).padStart(2, "0")}`;
+const ym = (k: number) => texteMois(Math.floor(k / 12), k % 12);
 
-/**
- * Map points for a month range: one point per data.json cell (at the cell centre, data.json has no
- * finer position), carrying the cell's hotspot count over the range. Summing n over the points gives
- * exactly the calendar total for the same region, period and mode.
- */
-function contractPoints(bbox: [number, number, number, number] | null, ring: Ring | undefined, kLo: number, kHi: number, variant: Variant): HotCollection {
-  const acc = new Map<string, { lat: number; lon: number; modis: number; viirs: number; harm: number }>();
-  for (const c of contractRows(bbox, ring)) {
-    const k = isoWeekMonth(c.iso_year, c.iso_week);
-    const key = monthKey(k.y, k.m);
-    if (key < kLo || key > kHi) continue;
-    let a = acc.get(c.cell_id);
-    if (!a) acc.set(c.cell_id, (a = { lat: c.lat, lon: c.lon, modis: 0, viirs: 0, harm: 0 }));
-    a.modis += c.modis_fire_days ?? 0;
-    a.viirs += c.viirs_fire_days ?? 0;
-    a.harm += c.harmonized_fire_days;
-  }
-  const period = kLo === kHi ? ym(kLo) : `${ym(kLo)} → ${ym(kHi)}`;
-  const features: HotFeature[] = [];
-  for (const [cell, a] of acc) {
-    const n = variant === "raw" ? a.modis + a.viirs : a.harm;
-    if (n <= 0) continue;
+interface HexFeature {
+  type: "Feature";
+  geometry: { type: "Polygon"; coordinates: Ring[] };
+  /** c = colour value (monthly mean over the period), n = hotspots over the period. */
+  properties: { h3: string; n: number; frp: number; c: number; months: number; period: string };
+}
+type HexCollection = { type: "FeatureCollection"; features: HexFeature[] };
+
+function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique): HexCollection {
+  const features: HexFeature[] = [];
+  for (const [h3, a] of rows) {
+    const v = metrique === "hotspots" ? a.n : a.frp;
+    if (v <= 0) continue;
     features.push({
       type: "Feature",
-      geometry: { type: "Point", coordinates: [a.lon, a.lat] },
-      properties: { n: Math.round(n * 100) / 100, modis: a.modis, viirs: a.viirs, harm: Math.round(a.harm * 100) / 100, cell, period },
+      geometry: { type: "Polygon", coordinates: [[...contourHex(h3), contourHex(h3)[0]]] },
+      properties: { h3, n: Math.round(a.n * 100) / 100, frp: Math.round(a.frp * 10) / 10, c: v / Math.max(1, months), months, period },
     });
   }
   return { type: "FeatureCollection", features };
 }
 
-/** CSV rows of data.json for the selection and study period (one row per cell x month). */
-function exportRows(sel: { region: RegionDef; ring: Ring }, range: DateRange): string[] {
-  const kLo = monthKey(range.from.y, range.from.m), kHi = monthKey(range.to.y, range.to.m);
-  const out: string[] = [];
-  for (const c of contractRows(sel.region.bbox, sel.ring)) {
-    const k = isoWeekMonth(c.iso_year, c.iso_week);
-    const key = monthKey(k.y, k.m);
-    if (key < kLo || key > kHi) continue;
-    out.push([c.cell_id, c.lat, c.lon, ym(key), c.modis_fire_days ?? "", c.viirs_fire_days ?? "",
-      c.harmonized_fire_days, c.harmonized_low, c.harmonized_high, c.source].join(","));
+/** One month of the world (no selection). */
+function hexDuMois(rows: HexMois[], period: string, metrique: Metrique): HexCollection {
+  const m = new Map<string, { n: number; frp: number }>();
+  for (const r of rows) m.set(r.h3, { n: r.hotspots, frp: r.frp });
+  return hexFeatures(m, 1, period, metrique);
+}
+
+/** Hexagons of the zone summed over the study period (from the tiles already loaded for the calendar). */
+function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique): HexCollection {
+  const i0 = indiceMois(index, range.from.y, range.from.m), i1 = indiceMois(index, range.to.y, range.to.m);
+  const m = new Map<string, { n: number; frp: number }>();
+  const dans = new Set(zone.serie.hexagones);
+  for (const t of zone.tuiles) for (const [h, parMois] of t) {
+    if (!dans.has(h)) continue;
+    let a = m.get(h);
+    for (const [i, v] of parMois) {
+      if (i < i0 || i > i1) continue;
+      if (!a) m.set(h, (a = { n: 0, frp: 0 }));
+      a.n += v.hotspots; a.frp += v.frp;
+    }
   }
-  return out.sort();
+  const period = i0 === i1 ? ym(monthKey(range.from.y, range.from.m)) : `${ym(monthKey(range.from.y, range.from.m))} → ${ym(monthKey(range.to.y, range.to.m))}`;
+  return hexFeatures(m, i1 - i0 + 1, period, metrique);
+}
+
+const r2 = (v: number | null) => (v === null ? "" : String(Math.round(v * 100) / 100));
+const PROV = (c: MoisZone) => (c.converti ? "viirs_converted" : "modis_observed");
+
+/** CSV of a zone: the monthly zone series (with bands and provenance), then every hexagon x month of the period. */
+function exportCsv(zone: ZoneChargee, index: IndexV2, range: DateRange): string | null {
+  const i0 = indiceMois(index, range.from.y, range.from.m), i1 = indiceMois(index, range.to.y, range.to.m);
+  const serie: string[] = [];
+  for (let i = Math.max(0, i0); i <= Math.min(i1, zone.serie.mois.length - 1); i++) {
+    const c = zone.serie.mois[i];
+    if (!c) continue;
+    serie.push([texteMois(c.y, c.m), r2(c.hotspots), r2(c.bas80), r2(c.haut80), r2(c.bas95), r2(c.haut95),
+      r2(c.frp), r2(c.frpBas80), r2(c.frpHaut80), PROV(c), c.partiel ? "partial" : "", c.couverture ?? ""].join(","));
+  }
+  if (!serie.length) return null;
+  const tete = `# Vigil ${index.methode} - ${zone.serie.source === "pays" ? `country ${zone.region.pays} (pays.json, validated scale)` : `zone of ${zone.serie.hexagones.length} H3 res-5 hexagons (centre inside)`}\n` +
+    `# hotspots = ${index.unites.hotspots}; frp_MW = ${index.unites.frp_MW}; bands = ${zone.serie.table ?? "n/a"}; generated ${index.genere_le}\n`;
+  let csv = tete + "month,hotspots,low_80,high_80,low_95,high_95,frp_MW,frp_low_80,frp_high_80,provenance,partial,coverage_days\n" + serie.join("\n") + "\n";
+  if (zone.serie.source === "h3") {
+    const dans = new Set(zone.serie.hexagones), lignes: string[] = [];
+    for (const t of zone.tuiles) for (const [h, parMois] of t) {
+      if (!dans.has(h)) continue;
+      const [lo, la] = centreHex(h);
+      for (const [i, v] of parMois) {
+        if (i < i0 || i > i1) continue;
+        const k = monthKey(cleMois(index.mois_index_0).y, cleMois(index.mois_index_0).m) + i;
+        lignes.push([h, la.toFixed(4), lo.toFixed(4), ym(k), r2(v.hotspots), r2(v.frp)].join(","));
+      }
+    }
+    csv += "\nh3,lat,lon,month,hotspots,frp_MW\n" + lignes.sort().join("\n") + "\n";
+  }
+  return csv;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -725,28 +365,53 @@ const SAT_STYLE: StyleSpecification = {
   ],
 };
 
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* UI helpers                                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
 
+/** Sequential YlOrRd-like ramp (colour-blind safe, never red–green). */
 const HEAT_STOPS: [number, [number, number, number]][] = [
   [0, [254, 243, 199]], [0.25, [252, 211, 77]], [0.5, [251, 146, 60]], [0.72, [234, 88, 12]], [0.88, [220, 38, 38]], [1, [127, 29, 29]],
 ];
-/**
- * Absolute calendar scale, shared by every region: the 98th percentile of monthly totals over all
- * preset regions (per data series). A cell is dark when the month is strong in absolute terms,
- * not just relative to its own region.
- */
-const HEAT_REF: Partial<Record<Variant, number>> = {};
-function absoluteHeatMax(variant: Variant): number {
-  const cached = HEAT_REF[variant];
-  if (cached) return cached;
-  const all: number[] = [];
-  for (const r of REGIONS) {
-    for (const row of monthlyValues(regionData(r), variant, "count", "all")) for (const c of row) if (c) all.push(c.total);
-  }
-  all.sort((a, b) => a - b);
-  return (HEAT_REF[variant] = all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1);
+/** Calendar scale of a zone: log(1 + x) / log(1 + P98 of its monthly values) (contract §6: log scale). */
+function heatMaxOf(mois: (MoisZone | null)[], metrique: Metrique): number {
+  const v = mois.filter((c): c is MoisZone => !!c && !c.partiel).map((c) => c[metrique]).filter((x) => x > 0).sort((a, b) => a - b);
+  return v.length ? v[Math.min(v.length - 1, Math.floor(v.length * 0.98))] : 1;
+}
+const heatT = (x: number, max: number) => (x <= 0 ? 0 : Math.log1p(x) / Math.log1p(Math.max(max, 1)));
+
+/** Map fill colour: steps at the quantiles of non-zero hexagon-months of index.json (log-spaced by nature). */
+const HEX_COLORS = ["#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026", "#800026"];
+function hexColorExpr(seuils: Record<string, number> | undefined): unknown {
+  const q = ["0.5", "0.75", "0.9", "0.95", "0.99"].map((k) => seuils?.[k]).filter((v): v is number => typeof v === "number");
+  const stops: unknown[] = [];
+  let last = -Infinity;
+  q.forEach((v, i) => { if (v > last) { stops.push(v, HEX_COLORS[i + 1]); last = v; } });
+  return stops.length ? ["step", ["get", "c"], HEX_COLORS[0], ...stops] : HEX_COLORS[2];
+}
+
+interface AnnualPt {
+  value: number | null;
+  est: boolean;
+}
+/** Annual totals; incomplete years (2002, current year, partial month) are scaled up from the mean seasonal share. */
+function annualSeries(vals: (number | null)[][]): AnnualPt[] {
+  const sums = vals.map((r) => r.reduce<number>((a, c) => a + (c ?? 0), 0));
+  const isFull = vals.map((r) => r.every((c) => c !== null));
+  return vals.map((row, yi) => {
+    if (isFull[yi]) return { value: sums[yi], est: false };
+    const obsMonths = row.map((c, m) => (c !== null ? m : -1)).filter((m) => m >= 0);
+    if (!obsMonths.length) return { value: null, est: true };
+    const ratios: number[] = [];
+    vals.forEach((r2, yj) => {
+      if (!isFull[yj] || sums[yj] <= 0) return;
+      ratios.push(obsMonths.reduce((a, m) => a + (r2[m] as number), 0) / sums[yj]);
+    });
+    const frac = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : 0;
+    if (frac < 0.2) return { value: null, est: true };
+    return { value: sums[yi] / frac, est: true };
+  });
 }
 
 function heatColor(t: number): string {
@@ -808,6 +473,7 @@ function Seg<T extends string>(props: { label: string; value: T; options: { v: T
   );
 }
 
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* RegionCard                                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -822,9 +488,15 @@ interface RegionCardProps {
   range: DateRange;
   onRangeChange: (r: DateRange) => void;
   onApplyBbox: (bbox: [number, number, number, number], name: string) => void;
+  /** First and last month of the export. */
+  bornes: Bornes;
+  /** CSV of the zone for the current study period, null when there is nothing to export. */
+  onExport: () => string | null;
+  /** False while the zone is loading. */
+  ready: boolean;
 }
 
-function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBbox }: RegionCardProps) {
+function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBbox, bornes, onExport, ready }: RegionCardProps) {
   const { region, wasPolygon } = selection;
 
   /* ── Rename ── */
@@ -878,9 +550,9 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
   const [rangeErr, setRangeErr] = useState("");
 
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const YEARS = Array.from({ length: LATEST.y - Y0 + 1 }, (_, i) => Y0 + i);
+  const YEARS = Array.from({ length: bornes.last.y - bornes.first.y + 1 }, (_, i) => bornes.first.y + i);
   const key = (d: { y: number; m: number }) => d.y * 12 + d.m;
-  const minKey = key({ y: Y0, m: FIRST_MONTH_Y0 }), maxKey = key(LATEST);
+  const minKey = key(bornes.first), maxKey = key(bornes.last);
   const fromKey = (k: number) => ({ y: Math.floor(k / 12), m: k % 12 });
   const clampKey = (k: number) => Math.min(maxKey, Math.max(minKey, k));
 
@@ -904,16 +576,15 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   const handleExport = () => {
     setExportErr("");
-    const rows = exportRows(selection, range);
-    if (!rows.length) {
-      setExportErr("No data.json hotspots in this area and period.");
+    const csv = onExport();
+    if (!csv) {
+      setExportErr(ready ? "No data for this area and period." : "The zone is still loading.");
       return;
     }
     const safeName = name.replace(/[^a-z0-9]/gi, "_");
     const fromStr = toMonthStr(range.from.y, range.from.m);
     const toStr = toMonthStr(range.to.y, range.to.m);
-    const header = "cell_id,lat,lon,month,modis_hotspots,viirs_hotspots,harmonized_hotspots,harmonized_low,harmonized_high,source\n";
-    const blob = new Blob([header + rows.join("\n") + "\n"], { type: "text/csv" });
+    const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1048,7 +719,9 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 interface Selection { region: RegionDef; ring: Ring; wasPolygon: boolean }
 type Tool = "none" | "box" | "poly";
 
-const LATEST = { y: Y1, m: LAST_MONTH_Y1 };
+/** Hexagon mode refuses zones whose tiles would be too heavy to download (use country mode instead). */
+const MAX_TUILES = 80;
+const MAX_OCTETS_ZONE = 120e6;
 const EMPTY_FC = { type: "FeatureCollection" as const, features: [] as unknown[] };
 
 function ExpandIcon() {
@@ -1102,23 +775,28 @@ function useDrag() {
   };
 }
 
+
 export default function Vigil() {
   const leftDrag = useDrag();
   const rightDrag = useDrag();
-  const [mode, setMode] = useState<Variant>("raw");
-  const metric: Metric = "count";
+  const [metrique, setMetrique] = useState<Metrique>("hotspots");
+  const [index, setIndex] = useState<IndexV2 | null>(null);
+  const [inc, setInc] = useState<IncertitudeV2 | null>(null);
+  const [erreur, setErreur] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [selectionName, setSelectionName] = useState("");
-  const [selRange, setSelRange] = useState<DateRange>({
-    from: { y: Y0, m: FIRST_MONTH_Y0 },
-    to: { y: LATEST.y, m: LATEST.m },
-  });
+  const [selRange, setSelRange] = useState<DateRange>({ from: { y: 2002, m: 0 }, to: { y: 2002, m: 0 } });
+  const [zone, setZone] = useState<ZoneChargee | null>(null);
+  const [zoneErr, setZoneErr] = useState<string | null>(null);
+  const [zoneProg, setZoneProg] = useState<{ done: number; total: number } | null>(null);
+  const [moisRows, setMoisRows] = useState<HexMois[] | null>(null);
+  const [moisErr, setMoisErr] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [split, setSplit] = useState(false);
   const [panelLeftOpen, setPanelLeftOpen] = useState(true);
   const [tool, setTool] = useState<Tool>("none");
   const [polyN, setPolyN] = useState(0);
-  const [date, setDate] = useState(LATEST);
+  const [date, setDate] = useState({ y: 2002, m: 0 });
   const [ready, setReady] = useState(false);
   const [tip, setTip] = useState<{ x: number; y: number; yi: number; m: number } | null>(null);
   const [hoverYear, setHoverYear] = useState<number | null>(null);
@@ -1131,7 +809,7 @@ export default function Vigil() {
   const searchRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<MLMap | null>(null);
-  const hotRef = useRef<HotCollection>({ type: "FeatureCollection", features: [] });
+  const hexRef = useRef<HexCollection>({ type: "FeatureCollection", features: [] });
   const selFcRef = useRef<unknown>(EMPTY_FC);
   const draftRef = useRef<unknown>(EMPTY_FC);
   const toolRef = useRef<Tool>("none");
@@ -1142,44 +820,117 @@ export default function Vigil() {
   const pendingFit = useRef<[number, number, number, number] | null>(null);
   const finalizeRef = useRef<(ring: Ring, fromBox?: boolean) => void>(() => {});
   const regionCounterRef = useRef(0);
+  const zoneReq = useRef(0);
   toolRef.current = tool;
   panelOpenRef.current = panelOpen;
 
+  /* ── Data: index.json + incertitude.json at start ── */
+  const bornes: Bornes | null = useMemo(() => index && index.mois.length
+    ? { first: cleMois(index.mois[0]), last: cleMois(index.mois[index.mois.length - 1]) } : null, [index]);
+  const fullRange = useCallback((): DateRange => bornes ? { from: bornes.first, to: bornes.last } : selRange, [bornes, selRange]);
+  const partiel = index ? moisPartiel(index) : null;
+
+  useEffect(() => {
+    let vivant = true;
+    (async () => {
+      try {
+        const [ix, ic] = await Promise.all([chargerIndex(), chargerIncertitude().catch(() => null)]);
+        if (!vivant) return;
+        if (!ix.mois?.length) throw new Error("index.json lists no month");
+        setIndex(ix);
+        setInc(ic);
+        const last = cleMois(ix.mois[ix.mois.length - 1]);
+        setDate(last);
+        setSelRange({ from: cleMois(ix.mois[0]), to: last });
+      } catch (e) {
+        if (vivant) setErreur(e instanceof ErreurDonnees ? `${e.url} (${e.statut})` : String((e as Error).message || e));
+      }
+    })();
+    return () => { vivant = false; };
+  }, []);
+
+  /* ── Zone: country series (pays.json) or sum of the H3 tiles under the zone ── */
+  useEffect(() => {
+    const req = ++zoneReq.current;
+    setZone(null); setZoneErr(null); setZoneProg(null);
+    if (!selection || !index) return;
+    const { region, ring } = selection;
+    const encore = () => req === zoneReq.current;
+    (async () => {
+      try {
+        if (region.pays) {
+          const s = (await chargerPays())[region.pays];
+          if (s) { if (encore()) setZone({ region, serie: seriePays(index, s), tuiles: [] }); return; }
+        }
+        const liste = tuilesDeZone(region.bbox, ring, new Set(index.tuiles), index.tuile_parent_resolution);
+        const moyenne = (index.tailles_octets?.h3_tuiles ?? 0) / Math.max(1, index.tuiles.length);
+        const estime = moyenne * liste.length;
+        if (liste.length > MAX_TUILES || estime > MAX_OCTETS_ZONE)
+          throw new Error(`Zone too large for the hexagon mode (${liste.length} tiles, ~${Math.round(estime / 1e6)} MB): draw a smaller zone or search a country.`);
+        let done = 0;
+        if (encore()) setZoneProg({ done, total: liste.length });
+        const tuiles = await Promise.all(liste.map((t) => chargerTuile(t).then((x) => {
+          done++;
+          if (encore()) setZoneProg({ done, total: liste.length });
+          return x;
+        })));
+        if (!encore()) return;
+        setZone({ region, serie: serieH3(index, inc, tuiles, region.bbox, ring), tuiles });
+        setZoneProg(null);
+      } catch (e) {
+        if (encore()) { setZoneErr(e instanceof ErreurDonnees ? `Download failed: ${e.url} (${e.statut})` : String((e as Error).message || e)); setZoneProg(null); }
+      }
+    })();
+  }, [selection, index, inc]);
+
+  /* ── Map month file: the slider month, or the end of the study period in country mode ── */
+  const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while the map rebuilds
+  const modeH3 = !!selection && !selection.region.pays;
+  const moisCarte = !index ? null : !selection ? texteMois(date.y, date.m) : modeH3 ? null : texteMois(deferredRange.to.y, deferredRange.to.m);
+  useEffect(() => {
+    setMoisErr(null);
+    if (!index || !moisCarte) { setMoisRows(null); return; }
+    if (!index.mois.includes(moisCarte)) { setMoisRows([]); return; }
+    let vivant = true;
+    chargerMois(moisCarte).then((r) => { if (vivant) setMoisRows(r); })
+      .catch((e) => { if (vivant) { setMoisRows([]); setMoisErr(e instanceof ErreurDonnees ? `${e.url} (${e.statut})` : String(e)); } });
+    return () => { vivant = false; };
+  }, [index, moisCarte]);
+
   /* ── Derived data ── */
-  const region = selection?.region ?? REGIONS[0];
-  const data = useMemo(() => regionData(region, selection?.ring), [region, selection]);
-  const rawVals = useMemo(() => monthlyValues(data, "raw", metric, "all"), [data, metric]);
-  const harmVals = useMemo(() => monthlyValues(data, "harm", metric, "all"), [data, metric]);
-  const vals = mode === "raw" ? rawVals : harmVals;
-  const rawAnnual = useMemo(() => annualSeries(rawVals), [rawVals]);
-  const harmAnnual = useMemo(() => annualSeries(harmVals), [harmVals]);
-  const heatMax = useMemo(() => absoluteHeatMax(mode), [mode]);
-  const annual = mode === "raw" ? rawAnnual : harmAnnual;
+  const region = selection?.region ?? null;
+  const serie = zone?.serie ?? null;
+  const Y0 = bornes?.first.y ?? 2002, Y1 = bornes?.last.y ?? 2002;
+  const NY = Y1 - Y0 + 1;
+  /** Calendar values: [year][month] of the chosen metric, null = no data. */
+  const vals = useMemo(() => Array.from({ length: NY }, (_, yi) => Array.from({ length: 12 }, (_, m): number | null => {
+    if (!serie || !index) return null;
+    const c = serie.mois[indiceMois(index, Y0 + yi, m)];
+    return c ? c[metrique] : null;
+  })), [serie, index, metrique, NY, Y0]);
+  const cellOf = (yi: number, m: number): MoisZone | null => (serie && index ? serie.mois[indiceMois(index, Y0 + yi, m)] ?? null : null);
+  // A partial month is not a complete month: left out of the annual totals (the year becomes estimated).
+  const annual = useMemo(() => annualSeries(vals.map((row, yi) => row.map((v, m) => (cellOf(yi, m)?.partiel ? null : v)))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [vals]);
+  const heatMax = useMemo(() => (serie ? heatMaxOf(serie.mois, metrique) : 1), [serie, metrique]);
   const stripes = useMemo(() => stripeColors(annual), [annual]);
 
-  const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while points rebuild
-  // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
-  const hotspots = useMemo(() => {
-    if (selection) {
-      return contractPoints(selection.region.bbox, selection.ring,
-        monthKey(deferredRange.from.y, deferredRange.from.m), monthKey(deferredRange.to.y, deferredRange.to.m), mode);
-    }
-    return contractPoints(null, undefined, monthKey(date.y, date.m), monthKey(date.y, date.m), mode);
-  }, [selection, deferredRange, date, mode]);
-  const pointTotal = useMemo(() => hotspots.features.reduce((a, f) => a + f.properties.n, 0), [hotspots]);
-  const covered = selection ? overlapsCoverage(selection.region.bbox) : true;
-  const fullyCovered = selection ? insideCoverage(selection.region.bbox) : true;
-  const cov = coverage();
-  const covText = cov ? `data.json covers ${fmtLat(cov.la0)}–${fmtLat(cov.la1)}, ${fmtLon(cov.lo0)}–${fmtLon(cov.lo1)}` : "data.json is empty";
-  const coverageNote = !covered
-    ? `No data for this area: ${covText}.`
-    : !fullyCovered ? `Partial coverage: only the part inside data.json is counted (${covText}).` : "";
+  const hexes = useMemo((): HexCollection => {
+    if (!index) return { type: "FeatureCollection", features: [] };
+    if (selection && zone && zone.serie.source === "h3") return hexDeZone(zone, index, deferredRange, metrique);
+    if (!moisRows || !moisCarte) return { type: "FeatureCollection", features: [] };
+    const rows = selection ? moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring)) : moisRows;
+    return hexDuMois(rows, moisCarte, metrique);
+  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte]);
+  const mapTotal = useMemo(() => hexes.features.reduce((a, f) => a + (metrique === "hotspots" ? f.properties.n : f.properties.frp), 0), [hexes, metrique]);
+  const seuils = index?.seuils_couleur_quantiles?.[metrique === "hotspots" ? "hotspots" : "frp_MW"];
 
   /* ── Map: push GeoJSON into sources ── */
   const pushSources = useCallback(() => {
     const m = mapRef.current;
     if (!m) return;
-    (m.getSource("hotspots") as GeoJSONSource | undefined)?.setData(hotRef.current as never);
+    (m.getSource("hex") as GeoJSONSource | undefined)?.setData(hexRef.current as never);
     (m.getSource("sel") as GeoJSONSource | undefined)?.setData(selFcRef.current as never);
     (m.getSource("draft") as GeoJSONSource | undefined)?.setData(draftRef.current as never);
   }, []);
@@ -1217,13 +968,13 @@ export default function Vigil() {
   ) => {
     setSelection({ region, ring, wasPolygon });
     setSelectionName(name ?? region.name);
-    if (resetRange) setSelRange({ from: { y: Y0, m: FIRST_MONTH_Y0 }, to: { y: LATEST.y, m: LATEST.m } });
+    if (resetRange) setSelRange(fullRange());
     setPanelOpen(true);
     panelOpenRef.current = true;
     selFcRef.current = { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ring] } }] };
     setDraft(EMPTY_FC);
     fitTo(region.bbox);
-  }, [fitTo, setDraft]);
+  }, [fitTo, setDraft, fullRange]);
 
   const handleApplyBbox = useCallback((bbox: [number, number, number, number], currentName: string) => {
     const ring = rectRing(bbox);
@@ -1285,26 +1036,25 @@ export default function Vigil() {
           const want = flatRef.current ? "mercator" : "globe";
           if (map.getProjection()?.type !== want) map.setProjection({ type: want });
         } catch { /* older style spec */ }
-        if (!map.getSource("hotspots")) {
-          map.addSource("hotspots", { type: "geojson", data: hotRef.current as never });
+        if (!map.getSource("hex")) {
+          map.addSource("hex", { type: "geojson", data: hexRef.current as never });
           map.addSource("sel", { type: "geojson", data: selFcRef.current as never });
           map.addSource("draft", { type: "geojson", data: draftRef.current as never });
           map.addLayer({ id: "sel-fill", type: "fill", source: "sel", paint: { "fill-color": "#dc2626", "fill-opacity": 0.07 } });
-          map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
           map.addLayer({
-            id: "hotspots", type: "circle", source: "hotspots",
-            paint: {
-              "circle-radius": ["interpolate", ["linear"], ["zoom"],
-                2, ["interpolate", ["linear"], ["sqrt", ["get", "n"]], 0, 1.5, 30, 8],
-                8, ["interpolate", ["linear"], ["sqrt", ["get", "n"]], 0, 3, 30, 20]],
-              "circle-color": ["step", ["get", "n"], "#fbbf24", 5, "#f97316", 20, "#ea580c", 100, "#dc2626"],
-              "circle-opacity": 0.85, "circle-stroke-color": "#ffffff", "circle-stroke-width": 0.5, "circle-stroke-opacity": 0.8,
-            },
+            id: "hex", type: "fill", source: "hex",
+            paint: { "fill-color": HEX_COLORS[2], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.85, 9, 0.6] },
           });
+          map.addLayer({
+            id: "hex-line", type: "line", source: "hex", minzoom: 5,
+            paint: { "line-color": "#ffffff", "line-width": 0.4, "line-opacity": 0.6 },
+          });
+          map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
           map.addLayer({ id: "draft-fill", type: "fill", source: "draft", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#0f172a", "fill-opacity": 0.08 } });
           map.addLayer({ id: "draft-line", type: "line", source: "draft", filter: ["any", ["==", ["geometry-type"], "Polygon"], ["==", ["geometry-type"], "LineString"]], paint: { "line-color": "#0f172a", "line-width": 2, "line-dasharray": [2, 2] } });
           map.addLayer({ id: "draft-pts", type: "circle", source: "draft", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 4.5, "circle-color": "#ffffff", "circle-stroke-color": "#0f172a", "circle-stroke-width": 2 } });
         }
+        colorRef.current();
       };
       map.on("style.load", install);
       map.on("load", () => {
@@ -1312,19 +1062,18 @@ export default function Vigil() {
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
-      // Hotspot popup
-      map.on("mouseenter", "hotspots", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", "hotspots", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; });
-      map.on("click", "hotspots", (e: MapLayerMouseEvent) => {
+      // Hexagon popup
+      map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; });
+      map.on("click", "hex", (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
-        const f = e.features[0];
-        const p = f.properties as { modis: number; viirs: number; harm: number; cell: string; period: string };
-        const [lng, lat] = (f.geometry as unknown as { coordinates: [number, number] }).coordinates;
-        const num = (v: unknown) => fmtInt(Number(v) || 0);
+        const p = e.features[0].properties as { h3: string; n: number; frp: number; months: number; period: string };
         const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+        const [lo, la] = centreHex(String(p.h3));
+        const moy = Number(p.months) > 1 ? `<tr><td>Per month</td><td>${fmtVal(Number(p.n) / Number(p.months))}</td></tr>` : "";
         new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
-          .setLngLat([lng, lat])
-          .setHTML(`<table><tr><td>Harmonized</td><td>${Number(p.harm).toFixed(1)} hotspots</td></tr><tr><td>MODIS</td><td>${num(p.modis)}</td></tr><tr><td>VIIRS</td><td>${num(p.viirs)}</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>Cell</td><td>${CELL_DEG}° · ${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
+          .setLngLat(e.lngLat)
+          .setHTML(`<table><tr><td>Hotspots</td><td>${fmtVal(Number(p.n))} <small>Aqua eq.</small></td></tr>${moy}<tr><td>FRP</td><td>${fmtInt(Number(p.frp))} MW</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>H3 res 5</td><td>${esc(p.h3)}<br><small>${la.toFixed(3)}, ${lo.toFixed(3)}</small></td></tr></table>`)
           .addTo(map);
       });
 
@@ -1385,6 +1134,16 @@ export default function Vigil() {
     return () => { cancelled = true; map?.remove(); mapRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Hexagon colours follow the metric (thresholds of index.json)
+  const colorRef = useRef<() => void>(() => {});
+  colorRef.current = () => {
+    const m = mapRef.current;
+    if (!m?.getLayer("hex")) return;
+    m.setPaintProperty("hex", "fill-color", hexColorExpr(seuils) as never);
+  };
+  useEffect(() => { colorRef.current(); }, [seuils, ready]);
+
 
   // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
   // MapLibre morphs globe <-> mercator through a zoom-driven expression, so each frame we slide the
@@ -1473,24 +1232,25 @@ export default function Vigil() {
     return () => window.removeEventListener("keydown", onKey);
   }, [split]);
 
+
   // Data → map
-  useEffect(() => { hotRef.current = hotspots; pushSources(); }, [hotspots, ready, pushSources]);
+  useEffect(() => { hexRef.current = hexes; pushSources(); }, [hexes, ready, pushSources]);
   useEffect(() => { pushSources(); }, [selection, ready, pushSources]);
 
   const stepDate = (d: number) => {
+    if (!bornes) return;
     let i = date.y * 12 + date.m + d;
-    const min = Y0 * 12 + FIRST_MONTH_Y0, max = Y1 * 12 + LAST_MONTH_Y1;
-    i = clamp(i, min, max);
+    i = clamp(i, monthKey(bornes.first.y, bornes.first.m), monthKey(bornes.last.y, bornes.last.m));
     setDate({ y: Math.floor(i / 12), m: i % 12 });
   };
 
   /* ── Trend chart geometry ── */
   const W = 340, H = 112, ml = 30, mr = 4, mt = 6, mb = 16;
   const pw = W - ml - mr, ph = H - mt - mb;
-  const seriesMax = Math.max(...rawAnnual.map((p) => p.value ?? 0), ...harmAnnual.map((p) => p.value ?? 0), 1);
+  const seriesMax = Math.max(...annual.map((p) => p.value ?? 0), 1);
   const ticks = niceTicks(seriesMax * 1.05);
   const yMax = ticks[ticks.length - 1];
-  const xAt = (i: number) => ml + (i / (NY - 1)) * pw;
+  const xAt = (i: number) => ml + (i / Math.max(1, NY - 1)) * pw;
   const yAt = (v: number) => mt + ph - (v / yMax) * ph;
   const pathOf = (s: (number | null)[]) => {
     let d = "", pen = false;
@@ -1501,18 +1261,20 @@ export default function Vigil() {
     });
     return d;
   };
-  const rawLine = rawAnnual.map((p) => p.value);
-  const harmLine = harmAnnual.map((p) => p.value);
+  const line = annual.map((p) => p.value);
+  const bascule = index ? new Date(index.bascule_viirs + "T00:00:00Z") : null;
+  const xBascule = bascule ? xAt(bascule.getUTCFullYear() - Y0 + bascule.getUTCMonth() / 12) : null;
   const onChartMove = (e: React.MouseEvent<SVGRectElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
     setHoverYear(clamp(Math.round(((e.clientX - r.left) / r.width) * (NY - 1)), 0, NY - 1));
   };
+  const yearTicks = Array.from({ length: NY }, (_, i) => Y0 + i).filter((y) => y % 5 === 0);
 
-  /* ── Heatmap tooltip data ── */
-  const tipCell = tip ? data[tip.yi][tip.m] : null;
-  const tipStats = tipCell ? { count: cellStats(tipCell, mode, "count", "all"), frp: cellStats(tipCell, mode, "frp", "all") } : null;
-  const sensorText = (c: Cell, s: { modis: number; viirs: number }) =>
-    !c.hasV ? "MODIS only" : `MODIS ${Math.round((s.modis / (s.modis + s.viirs || 1)) * 100)}% / VIIRS ${Math.round((s.viirs / (s.modis + s.viirs || 1)) * 100)}%`;
+  /* ── Calendar tooltip data ── */
+  const tipCell = tip ? cellOf(tip.yi, tip.m) : null;
+  const tipStat = tip && tipCell && serie && index ? statMois(serie, index, Y0 + tip.yi, tip.m, metrique) : null;
+  const petiteZone = serie?.source === "h3" && serie.hexagones.length < MIN_HEX_FOURCHETTE;
+  const band = (c: MoisZone): [number | null, number | null] => metrique === "hotspots" ? [c.bas80, c.haut80] : [c.frpBas80, c.frpHaut80];
 
   /* ── Calendar (year × month heatmap), shared by the panel and the split view ── */
   const renderCalendar = (large: boolean) => (
@@ -1521,20 +1283,21 @@ export default function Vigil() {
       {MONTHS.map((m) => <div key={m} className="hd-heat-col">{m[0]}</div>)}
       {vals.map((row, yi) => (
         <React.Fragment key={yi}>
-          <div className="hd-heat-row">{large || yi % 2 === 0 ? Y0 + yi : ""}</div>
-          {row.map((c, m) => {
-            const bg = !c ? undefined : c.total < heatMax * 0.015 ? "#e8edf3" : heatColor(Math.pow(c.total / heatMax, 0.62));
+          <div className="hd-heat-row">{large || (Y0 + yi) % 2 === 0 ? Y0 + yi : ""}</div>
+          {row.map((v, m) => {
+            const c = cellOf(yi, m);
+            const bg = v === null ? undefined : v <= 0 ? "#e8edf3" : heatColor(heatT(v, heatMax));
             const k = (Y0 + yi) * 12 + m;
             const inRange = k >= selRange.from.y * 12 + selRange.from.m && k <= selRange.to.y * 12 + selRange.to.m;
             const sel = selection ? inRange && selRange.from.y * 12 + selRange.from.m === selRange.to.y * 12 + selRange.to.m : date.y === Y0 + yi && date.m === m;
             return (
               <div
                 key={m}
-                className={"hd-cell" + (c ? "" : " empty") + (sel ? " sel" : "") + (selection && !inRange ? " out" : "")}
+                className={"hd-cell" + (v === null ? " empty" : "") + (c?.partiel ? " partial" : "") + (sel ? " sel" : "") + (selection && !inRange ? " out" : "")}
                 style={{ background: bg }}
                 onMouseMove={(e) => setTip({ x: e.clientX, y: e.clientY, yi, m })}
                 onClick={(e) => {
-                  if (!c) return;
+                  if (v === null) return;
                   if (!selection) { setDate({ y: Y0 + yi, m }); return; }
                   // With a selection the calendar edits the study period: click = that month, shift+click = extend.
                   const cur = { y: Y0 + yi, m };
@@ -1543,7 +1306,7 @@ export default function Vigil() {
                     setSelRange(lo ? { from: cur, to: selRange.to } : { from: selRange.from, to: cur });
                   } else setSelRange({ from: cur, to: cur });
                 }}
-                aria-label={c ? `${MONTHS[m]} ${Y0 + yi}: ${fmtInt(c.total)} ${unit(metric)}` : `${MONTHS[m]} ${Y0 + yi}: no data`}
+                aria-label={v !== null ? `${MONTHS[m]} ${Y0 + yi}: ${fmtVal(v)} ${unit(metrique)}${c?.partiel ? " (partial month)" : ""}` : `${MONTHS[m]} ${Y0 + yi}: no data`}
               />
             );
           })}
@@ -1551,14 +1314,11 @@ export default function Vigil() {
       ))}
       <div className="hd-heat-legend">
         <span>0</span><i />
-        <span>{covered ? `≥ ${fmtInt(Math.round(heatMax))} hotspots / month · same scale for every region` : "No data.json coverage for this area"}</span>
+        <span>{serie ? `≥ ${fmtCompact(heatMax)} ${unit(metrique)} / month · log scale, this zone` : zoneProg ? "Loading…" : "No data"}</span>
+        {partiel && <span className="hd-heat-partial"><b />partial month</span>}
       </div>
     </div>
   );
-
-  const bb = region.bbox;
-  const sgn = (v: number) => (v >= 0 ? "+" : "−");
-  void bb; void sgn;
 
   /* ── Country search ── */
   const searchMatches = useMemo(() => {
@@ -1567,15 +1327,16 @@ export default function Vigil() {
     return COUNTRIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8);
   }, [searchQuery]);
 
-  const selectCountry = useCallback((c: { name: string; bbox: [number, number, number, number] }) => {
-    const ring = rectRing(c.bbox);
-    applySelection(regionFromRing(ring), ring, c.name, false);
+  const selectCountry = useCallback(async (c: { name: string; bbox: [number, number, number, number] }) => {
     setSearchOpen(false);
     setSearchQuery("");
+    const pays = await chargerPays().catch(() => null);
+    const ring = rectRing(c.bbox);
+    applySelection({ ...regionFromRing(ring), name: c.name, pays: clePays(c.name, pays) }, ring, c.name, false);
   }, [applySelection]);
 
   useEffect(() => {
-    if (searchOpen) searchInputRef.current?.focus();
+    if (searchOpen) { searchInputRef.current?.focus(); chargerPays().catch(() => null); } // warm pays.json
   }, [searchOpen]);
 
   useEffect(() => {
@@ -1589,6 +1350,32 @@ export default function Vigil() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [searchOpen]);
+
+  /* ── Zone description (scale and band actually used) ── */
+  const zoneNote = !selection ? "" : zoneErr ? zoneErr
+    : zoneProg ? `Loading ${zoneProg.done}/${zoneProg.total} H3 tiles…`
+    : !serie ? "Loading…"
+    : serie.source === "pays"
+      ? `Country series (pays.json, validated country × month) · reliability ${LIB_FIAB[serie.fiabilite ?? ""] ?? serie.fiabilite}${metrique === "frp" && serie.fiabiliteFrp ? ` · FRP ${LIB_FIAB[serie.fiabiliteFrp] ?? serie.fiabiliteFrp}` : ""}`
+      : serie.hexagones.length === 0 ? "No H3 hexagon with fire has its centre in this zone."
+      : `${fmtInt(serie.hexagones.length)} H3 res-5 hexagons (centre inside) · band: ${serie.table === "hotspots_sous_pays" ? "sub-country table" : serie.table === "hotspots" ? "country table (not validated below country scale)" : "unavailable"}${petiteZone ? " · indicative band (zone smaller than the tested zones)" : ""}`;
+  const fiabFaible = serie?.source === "pays" && serie.fiabilite === "faible";
+  const exporter = () => (zone && index ? exportCsv(zone, index, selRange) : null);
+
+  if (erreur) {
+    return (
+      <div className="hd-root">
+        <style dangerouslySetInnerHTML={{ __html: CSS }} />
+        <div className="hd-fatal" role="alert">
+          <b>Vigil data (contract v2) could not be loaded.</b>
+          <p className="hd-mono">{erreur}</p>
+          <p>Expected files under <code>{BASE}/</code> (index.json, incertitude.json, pays.json, h3_5/…). On the backend PC run
+            <code> python -m pipeline.v2.export_site --site public/data</code>, or for a local demo
+            <code> node scripts/fixture_v2.mjs</code> then <code>NEXT_PUBLIC_VIGIL_DATA_BASE=/data-fixture npm run dev</code>.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="hd-root">
@@ -1646,6 +1433,7 @@ export default function Vigil() {
           {selection && <button className="hd-btn" onClick={clearSelection}>Clear</button>}
           <button className="hd-btn" onClick={() => setFlat(!flat)} aria-pressed={flat} title={flat ? "Switch to 3D globe" : "Switch to 2D map"}>{flat ? "3D" : "2D"}</button>
         </div>
+        {index?.fixture && <span className="hd-fixture" title={`${BASE}/index.json is marked fixture: true`}>Demo data (fixture), not the real export</span>}
       </div>
 
       {tool !== "none" && (
@@ -1658,36 +1446,49 @@ export default function Vigil() {
       {/* Date + legend */}
       <div className="hd-datechip">
         <div className="hd-date-row">
-          {selection ? (
+          {!index ? (
+            <span className="hd-mono">Loading {BASE}/index.json…</span>
+          ) : selection ? (
             <>
               <b className="hd-mono">
-                {`${selRange.from.y}-${String(selRange.from.m + 1).padStart(2, "0")} → ${selRange.to.y}-${String(selRange.to.m + 1).padStart(2, "0")}`}
+                {modeH3 ? `${texteMois(selRange.from.y, selRange.from.m)} → ${texteMois(selRange.to.y, selRange.to.m)}` : `Map: ${moisCarte}`}
               </b>
               <span className="hd-mono">
-                {fmtInt(pointTotal)} {mode === "raw" ? "hotspots (raw)" : "harmonized hotspots"} · {fmtInt(hotspots.features.length)} cells
+                {fmtVal(mapTotal)} {metrique === "hotspots" ? "hotspots" : "MW"} · {fmtInt(hexes.features.length)} hexagons
               </span>
             </>
           ) : (
             <>
               <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
-              <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
+              <b className="hd-mono">{texteMois(date.y, date.m)}</b>
               <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
-              <span className="hd-mono">{fmtInt(pointTotal)} {mode === "raw" ? "hotspots (raw)" : "harmonized hotspots"}</span>
-              {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
+              <span className="hd-mono">{moisRows === null ? "loading…" : `${fmtVal(mapTotal)} ${metrique === "hotspots" ? "hotspots" : "MW"}`}</span>
+              {bornes && (date.y !== bornes.last.y || date.m !== bornes.last.m) && <button className="hd-link" onClick={() => setDate(bornes.last)}>Latest</button>}
             </>
           )}
         </div>
-        {coverageNote && <div className="hd-nodata">{coverageNote}</div>}
+        {index && (
+          <div className="hd-prov">
+            {(() => {
+              const d = selection ? (modeH3 ? selRange.to : cleMois(moisCarte ?? index.mois[0])) : date;
+              const conv = estConverti(index, d.y, d.m);
+              return `${conv ? "VIIRS converted to MODIS-Aqua equivalent" : "Observed by MODIS Aqua"}${moisCarte === partiel ? " · partial month" : ""} · ${index.methode}`;
+            })()}
+          </div>
+        )}
+        {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
         <div className="hd-frp-legend">
-          <span>Hotspots / {CELL_DEG}° cell</span>
-          {[["#fbbf24", "<5"], ["#f97316", "5–20"], ["#ea580c", "20–100"], ["#dc2626", "≥100"]].map(([c, t]) => (
-            <span key={t}><i style={{ background: c }} />{t}</span>
-          ))}
+          <span>{metrique === "hotspots" ? "Hotspots" : "FRP (MW)"} / hexagon / month</span>
+          {(() => {
+            const q = ["0.5", "0.75", "0.9", "0.95", "0.99"].map((k) => seuils?.[k]).filter((v): v is number => typeof v === "number");
+            return [<span key="lo"><i style={{ background: HEX_COLORS[0] }} />{q.length ? `<${fmtVal(q[0])}` : "—"}</span>,
+              ...q.map((v, i) => <span key={i}><i style={{ background: HEX_COLORS[i + 1] }} />≥{fmtVal(v)}</span>)];
+          })()}
         </div>
       </div>
 
       {/* Fire stripes: one stripe per year, top right of the globe */}
-      {selection && covered && (
+      {selection && serie && (
         <div className="hd-stripes-card">
           <div className="hd-stripes" role="img" aria-label={`Fire stripes ${Y0}–${Y1} for ${selectionName}: one stripe per year, blue = fewer fires, red = more fires than the average year`}>
             {stripes.map((c, yi) => (
@@ -1695,16 +1496,16 @@ export default function Vigil() {
                 key={yi}
                 className={c ? "" : "empty"}
                 style={{ background: c ?? undefined }}
-                title={`${Y0 + yi}: ${annual[yi].value === null ? "no data" : `${fmtInt(annual[yi].value!)} ${unit(metric)}${annual[yi].est ? " (estimated, partial year)" : ""}`}`}
+                title={`${Y0 + yi}: ${annual[yi].value === null ? "no data" : `${fmtInt(annual[yi].value!)} ${unit(metrique)}${annual[yi].est ? " (estimated, partial year)" : ""}`}`}
               />
             ))}
           </div>
-          <div className="hd-stripes-axis"><span>{Y0}</span><span>fires / year</span><span>{Y1}</span></div>
+          <div className="hd-stripes-axis"><span>{Y0}</span><span>{metrique === "hotspots" ? "detections" : "FRP"} / year</span><span>{Y1}</span></div>
         </div>
       )}
 
       {/* Left panel: Region card */}
-      {selection && (
+      {selection && bornes && (
         <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
           <div className="hd-panel-head" {...leftDrag.handle}>
             <span className="hd-mono hd-name">{selectionName}</span>
@@ -1721,6 +1522,9 @@ export default function Vigil() {
                 range={selRange}
                 onRangeChange={setSelRange}
                 onApplyBbox={handleApplyBbox}
+                bornes={bornes}
+                onExport={exporter}
+                ready={!!zone}
               />
             </div>
           )}
@@ -1743,38 +1547,42 @@ export default function Vigil() {
 
           {panelOpen && (
             <div className="hd-panel-body">
-              <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw" }, { v: "harm", t: "Harmonized 1km" }]} />
+              <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
+              {zoneNote && <p className={"hd-zone-note" + (zoneErr || fiabFaible ? " warn" : "")} role={zoneErr ? "alert" : undefined}>{zoneNote}{fiabFaible ? " — little data, conversion less certain" : ""}</p>}
 
               {renderCalendar(false)}
 
               <div className="hd-chart-wrap">
-                <svg viewBox={`0 0 ${W} ${H}`} className="hd-chart" role="img" aria-label="Annual series, raw versus harmonized">
+                <svg viewBox={`0 0 ${W} ${H}`} className="hd-chart" role="img" aria-label={`Annual ${metrique === "hotspots" ? "hotspot" : "FRP"} totals, MODIS-Aqua equivalent`}>
                   {ticks.map((t) => (
                     <g key={t}>
                       <line x1={ml} x2={W - mr} y1={yAt(t)} y2={yAt(t)} stroke="#e2e8f0" />
                       <text x={ml - 6} y={yAt(t) + 3.5} textAnchor="end" className="hd-axis">{fmtCompact(t)}</text>
                     </g>
                   ))}
-                  {[2000, 2005, 2010, 2015, 2020, 2025].map((y) => <text key={y} x={xAt(y - Y0)} y={H - 3} textAnchor="middle" className="hd-axis">{y}</text>)}
-                  <line x1={xAt(2012 - Y0)} x2={xAt(2012 - Y0)} y1={mt} y2={mt + ph} stroke="#dc2626" strokeDasharray="3 3" opacity={0.6} />
-                  <text x={xAt(2012 - Y0) - 4} y={mt + 8} textAnchor="end" className="hd-annot">2012</text>
-                  <path d={pathOf(rawLine)} fill="none" stroke="#dc2626" strokeWidth={mode === "raw" ? 2.4 : 1.4} strokeDasharray="5 3" opacity={mode === "raw" ? 1 : 0.4} strokeLinejoin="round" />
-                  <path d={pathOf(harmLine)} fill="none" stroke="#ea580c" strokeWidth={mode === "harm" ? 2.4 : 1.4} opacity={mode === "harm" ? 1 : 0.45} strokeLinejoin="round" />
-                  {hoverYear !== null && (
+                  {yearTicks.map((y) => <text key={y} x={xAt(y - Y0)} y={H - 3} textAnchor="middle" className="hd-axis">{y}</text>)}
+                  {xBascule !== null && (
+                    <>
+                      <line x1={xBascule} x2={xBascule} y1={mt} y2={mt + ph} stroke="#dc2626" strokeDasharray="3 3" opacity={0.6} />
+                      <text x={xBascule - 4} y={mt + 8} textAnchor="end" className="hd-annot">VIIRS converted →</text>
+                    </>
+                  )}
+                  <path d={pathOf(line)} fill="none" stroke="#ea580c" strokeWidth={2.2} strokeLinejoin="round" />
+                  {annual.map((p, i) => p.value !== null && p.est ? <circle key={i} cx={xAt(i)} cy={yAt(p.value)} r={2.6} fill="#fff" stroke="#ea580c" strokeWidth={1.2} /> : null)}
+                  {hoverYear !== null && line[hoverYear] != null && (
                     <g>
                       <line x1={xAt(hoverYear)} x2={xAt(hoverYear)} y1={mt} y2={mt + ph} stroke="#0f172a" opacity={0.25} />
-                      {rawLine[hoverYear] != null && <circle cx={xAt(hoverYear)} cy={yAt(rawLine[hoverYear]!)} r={3.5} fill="#dc2626" stroke="#fff" strokeWidth={1.2} />}
-                      {harmLine[hoverYear] != null && <circle cx={xAt(hoverYear)} cy={yAt(harmLine[hoverYear]!)} r={3.5} fill="#ea580c" stroke="#fff" strokeWidth={1.2} />}
+                      <circle cx={xAt(hoverYear)} cy={yAt(line[hoverYear]!)} r={3.5} fill="#ea580c" stroke="#fff" strokeWidth={1.2} />
                     </g>
                   )}
                   <rect x={ml} y={mt} width={pw} height={ph} fill="transparent" onMouseMove={onChartMove} onMouseLeave={() => setHoverYear(null)} />
                 </svg>
                 <div className="hd-chart-legend">
-                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#dc2626" strokeWidth="2.4" strokeDasharray="4 3" /></svg>Raw</span>
-                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>Harmonized</span>
+                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>Harmonized, MODIS-Aqua eq.</span>
+                  <span><svg width="8" height="8"><circle cx="4" cy="4" r="2.6" fill="#fff" stroke="#ea580c" strokeWidth="1.2" /></svg>estimated (partial year)</span>
                   {hoverYear !== null && (
                     <span className="hd-mono hd-hover-read">
-                      {Y0 + hoverYear}: {rawLine[hoverYear] != null ? fmtCompact(rawLine[hoverYear]!) : "—"} / {harmLine[hoverYear] != null ? fmtCompact(harmLine[hoverYear]!) : "—"} {unit(metric)}
+                      {Y0 + hoverYear}: {line[hoverYear] != null ? fmtCompact(line[hoverYear]!) : "—"} {unit(metrique)}
                     </span>
                   )}
                 </div>
@@ -1789,32 +1597,50 @@ export default function Vigil() {
         <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
           <div className="hd-split-head">
             <span className="hd-word-sm">Vigil</span>
-            <span className="hd-mono hd-name">{region.name}</span>
-            <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw" }, { v: "harm", t: "Harmonized 1km" }]} />
+            <span className="hd-mono hd-name">{selectionName}</span>
+            <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
               <CollapseIcon />
             </button>
           </div>
           <div className="hd-split-body">
             <section className="hd-split-pane" aria-label="Calendar">
-              <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span></div>
+              <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span>{zoneNote && <span className="hd-zone-note inline">{zoneNote}</span>}</div>
               <div className="hd-split-cal">{renderCalendar(true)}</div>
             </section>
           </div>
         </div>
       )}
 
-      {/* Heatmap tooltip */}
+      {/* Calendar tooltip */}
       {tip && selection && (panelOpen || split) && (
-        <div className="hd-tip" style={{ left: Math.max(8, tip.x - 250), top: Math.max(8, tip.y - 12), transform: "translateY(-100%)" }}>
-          <div className="hd-tip-title">{Y0 + tip.yi}-{String(tip.m + 1).padStart(2, "0")}</div>
-          {tipCell && tipStats ? (
+        <div className="hd-tip" style={{ left: Math.max(8, tip.x - 270), top: Math.max(8, tip.y - 12), transform: "translateY(-100%)" }}>
+          <div className="hd-tip-title">{texteMois(Y0 + tip.yi, tip.m)}{tipCell?.partiel ? " · partial" : ""}</div>
+          {tipCell ? (
             <>
-              <div className="hd-tip-r"><span>Fire count</span><b>{fmtInt(tipStats.count.total)}</b></div>
-              <div className="hd-tip-r"><span>FRP</span><b>{fmtInt(tipStats.frp.total)} MW</b></div>
-              <div className="hd-tip-r"><span>Sensor origin</span><b>{sensorText(tipCell, tipStats.count)}</b></div>
-              <div className="hd-tip-r dim"><span>MODIS</span><b>{fmtInt(tipStats.count.modis)}</b></div>
-              <div className="hd-tip-r dim"><span>VIIRS</span><b>{tipCell.hasV ? fmtInt(tipStats.count.viirs) : "—"}</b></div>
+              <div className="hd-tip-r"><span>{metrique === "hotspots" ? "Hotspots" : "FRP"}</span><b>{fmtVal(tipCell[metrique])} {unit(metrique)}</b></div>
+              {tipCell.converti ? (() => {
+                const [lo, hi] = band(tipCell);
+                return lo !== null && hi !== null
+                  ? <div className="hd-tip-r"><span>80 % band{petiteZone ? " (indicative)" : ""}</span><b>{fmtVal(lo)} – {fmtVal(hi)}</b></div>
+                  : <div className="hd-tip-r dim"><span>Band</span><b>n/a</b></div>;
+              })() : null}
+              {tipCell.converti && metrique === "hotspots" && tipCell.bas95 !== null && tipCell.haut95 !== null && (
+                <div className="hd-tip-r dim"><span>95 % band</span><b>{fmtVal(tipCell.bas95)} – {fmtVal(tipCell.haut95)}</b></div>
+              )}
+              {tipCell.converti && metrique === "frp" && serie?.source === "h3" && <div className="hd-tip-note">FRP band validated at country × month only</div>}
+              <div className="hd-tip-r"><span>Source</span><b>{tipCell.converti ? "VIIRS converted" : "MODIS Aqua observed"}</b></div>
+              <div className="hd-tip-r dim"><span>{metrique === "hotspots" ? "FRP" : "Hotspots"}</span><b>{metrique === "hotspots" ? `${fmtInt(tipCell.frp)} MW` : fmtVal(tipCell.hotspots)}</b></div>
+              {tipCell.couverture !== null && <div className="hd-tip-r dim"><span>Days with data</span><b>{fmtInt(tipCell.couverture)}</b></div>}
+              {tipStat ? (
+                <>
+                  <div className="hd-tip-sep" />
+                  <div className="hd-tip-r"><span>vs 2003–2025</span><b>{tipStat.classe}</b></div>
+                  <div className="hd-tip-r dim"><span>Median {MONTHS[tip.m]}</span><b>{fmtVal(tipStat.mediane)}</b></div>
+                  <div className="hd-tip-r dim"><span>% of median</span><b>{tipStat.pctMediane === null ? "n.d." : `${Math.round(tipStat.pctMediane)} %`}</b></div>
+                  <div className="hd-tip-r dim"><span>Percentile rank</span><b>{Math.round(tipStat.rang)} ({tipStat.n} yrs)</b></div>
+                </>
+              ) : tipCell.partiel ? <div className="hd-tip-note">Partial month: not compared with complete months</div> : null}
             </>
           ) : (
             <div className="hd-tip-r"><span>No data</span></div>
@@ -1994,5 +1820,19 @@ const CSS = `
   .hd-stripes-card{width:150px;right:50px}
   .hd-stripes{height:56px}
 }
+/* ── Contract v2 ── */
+.hd-fatal{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(560px,calc(100% - 32px));background:#fff;border:1px solid #fecaca;border-radius:10px;padding:18px 20px;box-shadow:0 8px 24px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:8px}
+.hd-fatal code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#f1f5f9;border-radius:4px;padding:1px 4px}
+.hd-fixture{padding:6px 10px;font-size:11px;font-weight:650;color:#92400e;background:rgba(254,243,199,.92)!important}
+.hd-prov{margin-top:3px;font-size:10.5px;color:var(--mut)}
+.hd-zone-note{margin:6px 14px 8px;font-size:11px;color:var(--mut);line-height:1.35}
+.hd-zone-note.warn{color:#b45309}
+.hd-zone-note.inline{margin:0 0 0 12px}
+.hd-cell.partial{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)!important}
+.hd-heat-partial{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
+.hd-heat-partial b{width:10px;height:6px;border-radius:1px;background:#fb923c repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)}
+.hd-tip-sep{height:1px;background:rgba(148,163,184,.3);margin:5px 0}
+.hd-tip-note{font-size:10.5px;color:#fbbf24;margin-top:2px}
+.hd-popup small{color:var(--mut);font-weight:400}
 @media (prefers-reduced-motion:reduce){.hd-root *{transition:none!important}}
 `;
