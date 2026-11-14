@@ -185,11 +185,11 @@ export default function DeepDive({ index, serie, ring, bbox, y0, y1, focus, stat
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={dd.c1} margin={{ top: 4, right: 32, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke="rgba(15,23,42,0.18)" strokeDasharray="2 2" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 8, fill: "#64748b" }} interval={23} tickLine={false} axisLine={false} />
-                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={30} />
-                <YAxis yAxisId="temp" orientation="right" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={22} unit="°" />
+                <XAxis dataKey="label" tick={{ fontSize: 8, fill: "#000000" }} interval={23} tickLine={false} axisLine={false} />
+                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} width={30} />
+                <YAxis yAxisId="temp" orientation="right" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} width={22} unit="°" />
                 <Tooltip contentStyle={tipStyle} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
-                <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#000000" }} />
                 <Line yAxisId="fires" type="monotone" dataKey="fires" stroke="#ea580c" strokeWidth={1} dot={false} name="Hotspots (harmonized)" />
                 {wxStatus === "ok" && <Line yAxisId="temp" type="monotone" dataKey="tmax" stroke="#94a3b8" strokeWidth={1} dot={false} name="Tmax °C" connectNulls />}
                 <ReferenceLine yAxisId="fires" x={focusLabel} stroke="#0f172a" strokeWidth={1.5} strokeOpacity={0.4} />
@@ -205,11 +205,11 @@ export default function DeepDive({ index, serie, ring, bbox, y0, y1, focus, stat
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={dd.c2} margin={{ top: 4, right: 32, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke="rgba(15,23,42,0.18)" strokeDasharray="2 2" vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} />
-                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={30} />
-                <YAxis yAxisId="wx" orientation="right" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={22} />
+                <XAxis dataKey="name" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} />
+                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} width={30} />
+                <YAxis yAxisId="wx" orientation="right" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} width={22} />
                 <Tooltip contentStyle={tipStyle} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
-                <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#000000" }} />
                 <Bar yAxisId="fires" dataKey="fires" name="Hotspots (median)" radius={[2, 2, 0, 0]}>
                   {dd.c2.map((e, i) => <RCell key={i} fill="#ea580c" fillOpacity={e.sel ? 1 : 0.5} />)}
                 </Bar>
@@ -233,14 +233,14 @@ export default function DeepDive({ index, serie, ring, bbox, y0, y1, focus, stat
               <ResponsiveContainer width="100%" height="100%">
                 <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                   <CartesianGrid stroke="rgba(15,23,42,0.18)" strokeDasharray="2 2" />
-                  <XAxis type="number" dataKey="hdi" name="Hot/dry index" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} domain={[0, "dataMax"]} tickFormatter={(v: number) => v.toFixed(2)} />
-                  <YAxis type="number" dataKey="fires" name="Hotspots" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={30} />
+                  <XAxis type="number" dataKey="hdi" name="Hot/dry index" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} domain={[0, "dataMax"]} tickFormatter={(v: number) => v.toFixed(2)} />
+                  <YAxis type="number" dataKey="fires" name="Hotspots" tick={{ fontSize: 8, fill: "#000000" }} tickLine={false} axisLine={false} width={30} />
                   <Tooltip cursor={{ strokeDasharray: "3 3" }} content={({ active, payload }) => {
                     if (!active || !payload?.length) return null;
                     const d = payload[0]?.payload as { hdi: number; fires: number; label: string };
                     return <div style={tipStyle}><div style={{ color: "#94a3b8", marginBottom: 2 }}>{d.label}</div><div>Hotspots: {fmtInt(d.fires)}</div><div>HDI: {d.hdi.toFixed(3)}</div></div>;
                   }} />
-                  <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                  <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#000000" }} />
                   <Scatter name="MODIS Aqua observed" data={dd.c3pre} fill="#ea580c" fillOpacity={0.65} />
                   <Scatter name="VIIRS converted" data={dd.c3post} fill="#64748b" fillOpacity={0.65} />
                 </ScatterChart>
