@@ -1271,6 +1271,8 @@ export default function Vigil() {
   const [hoverYear, setHoverYear] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [flat, setFlat] = useState(false);
+  const flatRef = useRef(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLDivElement>(null);
@@ -1417,7 +1419,10 @@ export default function Vigil() {
 
       const install = () => {
         if (!map) return;
-        try { if (map.getProjection()?.type !== "globe") map.setProjection({ type: "globe" }); } catch { /* older style spec */ }
+        try {
+          const want = flatRef.current ? "mercator" : "globe";
+          if (map.getProjection()?.type !== want) map.setProjection({ type: want });
+        } catch { /* older style spec */ }
         if (!map.getSource("hotspots")) {
           map.addSource("hotspots", { type: "geojson", data: hotRef.current as never });
           map.addSource("sel", { type: "geojson", data: selFcRef.current as never });
@@ -1514,6 +1519,26 @@ export default function Vigil() {
     return () => { cancelled = true; map?.remove(); mapRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 2D plan / 3D globe projection toggle
+  useEffect(() => {
+    flatRef.current = flat;
+    const m = mapRef.current;
+    if (!m || !ready) return;
+    try {
+      m.setProjection({ type: flat ? "mercator" : "globe" });
+      // A flat plan stays north-up and top-down; the globe keeps tilt and rotation.
+      m.setMaxPitch(flat ? 0 : 75);
+      if (flat) {
+        m.easeTo({ pitch: 0, bearing: 0, duration: 400 });
+        m.dragRotate.disable();
+        m.touchZoomRotate.disableRotation();
+      } else {
+        m.dragRotate.enable();
+        m.touchZoomRotate.enableRotation();
+      }
+    } catch { /* older style spec */ }
+  }, [flat, ready]);
 
   // Tool side effects
   useEffect(() => {
@@ -1711,6 +1736,7 @@ export default function Vigil() {
           <button className={"hd-btn" + (tool === "poly" ? " on" : "")} onClick={() => pickTool("poly")}>Polygon</button>
           {tool === "poly" && polyN >= 3 && <button className="hd-btn accent" onClick={finishPoly}>Finish</button>}
           {selection && <button className="hd-btn" onClick={clearSelection}>Clear</button>}
+          <button className="hd-btn" onClick={() => setFlat(!flat)} aria-pressed={flat} title={flat ? "Switch to 3D globe" : "Switch to 2D map"}>{flat ? "3D" : "2D"}</button>
         </div>
       </div>
 
