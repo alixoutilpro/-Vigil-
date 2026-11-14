@@ -900,7 +900,6 @@ export default function Vigil() {
     const rows = selection ? moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring)) : moisRows;
     return hexDuMois(rows, moisCarte, metrique);
   }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte]);
-  const mapTotal = useMemo(() => hexes.features.reduce((a, f) => a + (metrique === "hotspots" ? f.properties.n : f.properties.frp), 0), [hexes, metrique]);
   const seuils = index?.seuils_couleur_quantiles?.[metrique === "hotspots" ? "hotspots" : "frp_MW"];
 
   /* ── Map: push GeoJSON into sources ── */
@@ -1000,7 +999,7 @@ export default function Vigil() {
       const maplibregl = (await import("maplibre-gl")).default;
       if (cancelled || !containerRef.current) return;
       map = new maplibregl.Map({
-        container: containerRef.current, style: SAT_STYLE, center: [12, 24], zoom: 2.1, maxPitch: 75,
+        container: containerRef.current, style: SAT_STYLE, center: [12, 24], zoom: 2.4, maxPitch: 75,
         attributionControl: { compact: true },
       });
       mapRef.current = map;
@@ -1213,13 +1212,6 @@ export default function Vigil() {
   // Data → map
   useEffect(() => { hexRef.current = hexes; pushSources(); }, [hexes, ready, pushSources]);
   useEffect(() => { pushSources(); }, [selection, ready, pushSources]);
-
-  const stepDate = (d: number) => {
-    if (!bornes) return;
-    let i = date.y * 12 + date.m + d;
-    i = clamp(i, monthKey(bornes.first.y, bornes.first.m), monthKey(bornes.last.y, bornes.last.m));
-    setDate({ y: Math.floor(i / 12), m: i % 12 });
-  };
 
   /* ── Trend chart geometry ── */
   const W = 340, H = 112, ml = 30, mr = 4, mt = 6, mb = 16;
@@ -1463,50 +1455,6 @@ export default function Vigil() {
         </div>
       )}
 
-      {/* Date + legend */}
-      <div className="hd-datechip">
-        <div className="hd-date-row">
-          {!index ? (
-            <span className="hd-mono">Loading {BASE}/index.json…</span>
-          ) : selection ? (
-            <>
-              <b className="hd-mono">
-                {modeH3 ? `${texteMois(selRange.from.y, selRange.from.m)} → ${texteMois(selRange.to.y, selRange.to.m)}` : `Map: ${moisCarte}`}
-              </b>
-              <span className="hd-mono">
-                {fmtVal(mapTotal)} {metrique === "hotspots" ? "hotspots" : "MW"} · {fmtInt(hexes.features.length)} hexagons
-              </span>
-            </>
-          ) : (
-            <>
-              <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
-              <b className="hd-mono">{texteMois(date.y, date.m)}</b>
-              <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
-              <span className="hd-mono">{moisRows === null ? "loading…" : `${fmtVal(mapTotal)} ${metrique === "hotspots" ? "hotspots" : "MW"}`}</span>
-              {bornes && (date.y !== bornes.last.y || date.m !== bornes.last.m) && <button className="hd-link" onClick={() => setDate(bornes.last)}>Latest</button>}
-            </>
-          )}
-        </div>
-        {index && (
-          <div className="hd-prov">
-            {(() => {
-              const d = selection ? (modeH3 ? selRange.to : cleMois(moisCarte ?? index.mois[0])) : date;
-              const conv = estConverti(index, d.y, d.m);
-              return `${conv ? "VIIRS converted to MODIS-Aqua equivalent" : "Observed by MODIS Aqua"}${moisCarte === partiel ? " · partial month" : ""} · ${index.methode}`;
-            })()}
-          </div>
-        )}
-        {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
-        <div className="hd-frp-legend">
-          <span>{metrique === "hotspots" ? "Hotspots" : "FRP (MW)"} / hexagon / month</span>
-          {(() => {
-            const q = ["0.5", "0.75", "0.9", "0.95", "0.99"].map((k) => seuils?.[k]).filter((v): v is number => typeof v === "number");
-            return [<span key="lo"><i style={{ background: HEX_COLORS[0] }} />{q.length ? `<${fmtVal(q[0])}` : "—"}</span>,
-              ...q.map((v, i) => <span key={i}><i style={{ background: HEX_COLORS[i + 1] }} />≥{fmtVal(v)}</span>)];
-          })()}
-        </div>
-      </div>
-
       {/* Left panel: Region card */}
       {selection && bornes && (
         <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
@@ -1708,16 +1656,6 @@ const CSS = `
 .hd-hintbar{position:absolute;top:62px;left:50%;transform:translateX(-50%);z-index:5;background:var(--tx);color:#fff;border-radius:999px;padding:6px 14px;display:flex;gap:14px;font-size:12px}
 .hd-hintbar span{color:#94a3b8}
 
-.hd-datechip{position:absolute;left:12px;bottom:28px;z-index:5;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;padding:7px 10px;box-shadow:0 2px 12px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:6px}
-.hd-date-row{display:flex;align-items:center;gap:8px}
-.hd-date-row button{border:0;background:rgba(15,23,42,.06);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
-.hd-date-row button:hover{background:var(--bg2)}
-.hd-date-row .hd-link{width:auto;border:0;background:none;color:var(--or);font-weight:600;font-size:12px;padding:0 2px;height:auto}
-.hd-nodata{margin-top:4px;color:#b45309;font-size:11px;max-width:340px}
-.hd-frp-legend{display:flex;gap:10px;color:var(--mut);font-size:11px;align-items:center}
-.hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
-.hd-frp-legend i{width:9px;height:9px;border-radius:50%}
-
 .hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
   background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
 .hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
@@ -1834,7 +1772,6 @@ const CSS = `
 @media (max-width:900px){
   .hd-panel{right:8px;left:8px;width:auto;bottom:8px;max-height:50vh}
   .hd-panel-left{left:8px;right:8px;width:auto;top:auto;bottom:calc(50vh + 24px);max-height:36vh}
-  .hd-datechip{display:none}
   .hd-toolbar{right:50px}
 }
 /* ── E7 block and PNG button ── */
@@ -1848,7 +1785,6 @@ const CSS = `
 .hd-fatal{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(560px,calc(100% - 32px));background:#fff;border:1px solid #fecaca;border-radius:10px;padding:18px 20px;box-shadow:0 8px 24px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:8px}
 .hd-fatal code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#f1f5f9;border-radius:4px;padding:1px 4px}
 .hd-fixture{padding:6px 10px;font-size:11px;font-weight:650;color:#92400e;background:rgba(254,243,199,.92)!important}
-.hd-prov{margin-top:3px;font-size:10.5px;color:var(--mut)}
 .hd-zone-note{margin:6px 14px 8px;font-size:11px;color:var(--mut);line-height:1.35}
 .hd-zone-note.warn{color:#b45309}
 .hd-zone-note.inline{margin:0 0 0 12px}
