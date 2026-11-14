@@ -25,6 +25,7 @@ import {
 import { cellArea, cellToChildren, cellToParent } from "h3-js";
 import { quantileHF8, rangValeur, serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 import DeepDive from "./DeepDive";
+import { PALETTE_CSS, initDaltonien, palette, setDaltonien, useDaltonien } from "./palette";
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Types & constants                                                          */
@@ -424,10 +425,7 @@ const SAT_STYLE: StyleSpecification = {
 /* UI helpers                                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-/** Sequential YlOrRd-like ramp (colour-blind safe, never red–green). */
-const HEAT_STOPS: [number, [number, number, number]][] = [
-  [0, [254, 243, 199]], [0.25, [252, 211, 77]], [0.5, [251, 146, 60]], [0.72, [234, 88, 12]], [0.88, [220, 38, 38]], [1, [127, 29, 29]],
-];
+/** Calendar ramp: palette().heat (sequential, colour-blind safe, never red–green; viridis in colour-blind mode). */
 /** Calendar scale of a zone: log(1 + x) / log(1 + P98 of its monthly values) (contract §6: log scale). */
 function heatMaxOf(mois: (MoisZone | null)[], metrique: Metrique): number {
   const v = mois.filter((c): c is MoisZone => !!c && !c.partiel).map((c) => c[metrique]).filter((x) => x > 0).sort((a, b) => a - b);
@@ -445,17 +443,23 @@ const heatT = (x: number, max: number) => (x <= 0 ? 0 : Math.log1p(x) / Math.log
  * Occupancy checked on 13.5 M res-5 hexagon-months 2002-07 → 2026-10 (and their res-4/res-3 parents):
  * no empty class, none above 28 %. Sequential light-yellow → dark-red ramp, monotone lightness, colour-blind safe.
  */
-const HEX_COLORS = ["#ffffd4", "#fff3a8", "#ffe680", "#ffd45c", "#ffbd45", "#fea03a", "#fd8132", "#f5602a", "#e44022", "#c9261b", "#a11416", "#6e0a10"];
+/** The 12 class colours come from the active palette (app/palette.ts): YlOrRd, or reversed viridis in colour-blind mode. */
 const DENS_BREAKS: Record<Metrique, number[]> = {
   hotspots: [0.02, 0.05, 0.1, 0.2, 0.5, 1, 3, 7, 12, 25, 60],
   frp: [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000],
 };
 function hexColorExpr(metrique: Metrique): unknown {
   const stops: unknown[] = [];
-  DENS_BREAKS[metrique].forEach((v, i) => stops.push(v, HEX_COLORS[i + 1]));
-  return ["step", ["get", "c"], HEX_COLORS[0], ...stops];
+  const hex = palette().hex;
+  DENS_BREAKS[metrique].forEach((v, i) => stops.push(v, hex[i + 1]));
+  return ["step", ["get", "c"], hex[0], ...stops];
 }
 /** Every class drawn opaque enough to read the ramp; slightly more transparent when zoomed in (imagery visible). */
+/** Fire-by-fire points: MODIS / VIIRS colours of the palette, transparent when not counted. */
+function ptsColorExpr(): unknown {
+  const p = palette();
+  return ["case", ["!", ["get", "compte"]], "rgba(0,0,0,0)", ["get", "modis"], p.modis, p.viirs];
+}
 function hexOpacityExpr(): unknown {
   return ["interpolate", ["linear"], ["zoom"], 2, 0.88, 9, 0.75];
 }
@@ -474,6 +478,7 @@ function annualSeries(vals: (number | null)[][]): AnnualPt[] {
 
 function heatColor(t: number): string {
   t = clamp(t, 0, 1);
+  const HEAT_STOPS = palette().heat;
   for (let i = 1; i < HEAT_STOPS.length; i++) {
     if (t <= HEAT_STOPS[i][0]) {
       const [t0, c0] = HEAT_STOPS[i - 1];
@@ -482,7 +487,7 @@ function heatColor(t: number): string {
       return `rgb(${c0.map((c, k) => Math.round(c + (c1[k] - c) * f)).join(",")})`;
     }
   }
-  return "rgb(127,29,29)";
+  return `rgb(${HEAT_STOPS[HEAT_STOPS.length - 1][1].join(",")})`;
 }
 
 function niceTicks(max: number, n = 3): number[] {
@@ -944,6 +949,9 @@ function useDrag() {
 
 
 export default function Vigil() {
+  const daltonien = useDaltonien();
+  const pal = palette();
+  useEffect(() => { initDaltonien(); }, []);
   const leftDrag = useDrag();
   const rightDrag = useDrag();
   const [metrique, setMetrique] = useState<Metrique>("hotspots");
@@ -1296,23 +1304,23 @@ export default function Vigil() {
           map.addSource("hex", { type: "geojson", data: hexRef.current as never });
           map.addSource("sel", { type: "geojson", data: selFcRef.current as never });
           map.addSource("draft", { type: "geojson", data: draftRef.current as never });
-          map.addLayer({ id: "sel-fill", type: "fill", source: "sel", paint: { "fill-color": "#dc2626", "fill-opacity": 0.07 } });
+          map.addLayer({ id: "sel-fill", type: "fill", source: "sel", paint: { "fill-color": palette().alert, "fill-opacity": 0.07 } });
           map.addLayer({
             id: "hex", type: "fill", source: "hex",
-            paint: { "fill-color": HEX_COLORS[4], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 2, ["case", ["<", ["get", "c"], 0.3], 0.35, 0.88], 9, ["case", ["<", ["get", "c"], 0.3], 0.3, 0.7]] }, // near-empty hexagons fade
+            paint: { "fill-color": palette().hex[4], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 2, ["case", ["<", ["get", "c"], 0.3], 0.35, 0.88], 9, ["case", ["<", ["get", "c"], 0.3], 0.3, 0.7]] }, // near-empty hexagons fade
           });
           map.addLayer({ // the mesh: hexagon outlines at every zoom
             id: "hex-line", type: "line", source: "hex",
             paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.25, 8, 0.8], "line-opacity": 0.55 },
           });
-          map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
+          map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": palette().alert, "line-width": 2 } });
           // fire by fire (Greece): MODIS = 1 km pixel (cyan, larger), VIIRS = 375 m (yellow); not counted = grey ring
           map.addSource("pts", { type: "geojson", data: ptsRef.current as never });
           map.addLayer({
             id: "pts", type: "circle", source: "pts",
             paint: {
               "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, ["case", ["get", "modis"], 3, 2], 10, ["case", ["get", "modis"], 7, 4.5]],
-              "circle-color": ["case", ["!", ["get", "compte"]], "rgba(0,0,0,0)", ["get", "modis"], "#22d3ee", "#fde047"],
+              "circle-color": ptsColorExpr() as never,
               "circle-stroke-color": ["case", ["get", "compte"], "#0f172a", "#e2e8f0"],
               "circle-stroke-width": ["case", ["get", "compte"], 0.8, 1.2],
               "circle-opacity": 0.95,
@@ -1367,7 +1375,7 @@ export default function Vigil() {
           (months > 1 ? row("Per month", fmtVal(n / months)) : "") +
           row("Σ FRP", `${fmtVal(frp)} <small>MW</small>`, "Sum of the Fire Radiative Power of the detections, MODIS-Aqua equivalent") +
           (n > 0 ? row("FRP / detection", `${fmtVal(frp / n)} <small>MW</small>`, "Mean intensity of a detection (Σ FRP / detections)") : "") +
-          row("Density", `<i class="hd-pop-sw" style="background:${HEX_COLORS[cls]}"></i>${fmtVal(c)} <small>/1,000 km²/mo · class ${cls + 1}/12</small>`, "Colour value of the map: per 1,000 km² and per month") +
+          row("Density", `<i class="hd-pop-sw" style="background:${palette().hex[cls]}"></i>${fmtVal(c)} <small>/1,000 km²/mo · class ${cls + 1}/12</small>`, "Colour value of the map: per 1,000 km² and per month") +
           row("Source", src) +
           row(`H3 res ${res}`, `${TAILLE_RES[res] ?? ""} · ${fmtInt(aireKm2(h))} km²`) +
           `</table>`,
@@ -1471,8 +1479,12 @@ export default function Vigil() {
     if (!m?.getLayer("hex")) return;
     m.setPaintProperty("hex", "fill-color", hexColorExpr(metrique) as never);
     m.setPaintProperty("hex", "fill-opacity", hexOpacityExpr() as never);
+    const p = palette();
+    if (m.getLayer("sel-fill")) m.setPaintProperty("sel-fill", "fill-color", p.alert);
+    if (m.getLayer("sel-line")) m.setPaintProperty("sel-line", "line-color", p.alert);
+    if (m.getLayer("pts")) m.setPaintProperty("pts", "circle-color", ptsColorExpr() as never);
   };
-  useEffect(() => { colorRef.current(); }, [metrique, resCarte, ready]);
+  useEffect(() => { colorRef.current(); }, [metrique, resCarte, ready, daltonien]);
 
 
   // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
@@ -1656,7 +1668,7 @@ export default function Vigil() {
   const focusStat = serie && index ? statMois(serie, index, focus.y, focus.m, metrique) : null;
   const focusStatHot = serie && index ? statMois(serie, index, focus.y, focus.m, "hotspots") : null;
   const focusCell = serie && index ? serie.mois[indiceMois(index, focus.y, focus.m)] ?? null : null;
-  const CLASS_COLORS: Record<string, string> = { "much below normal": "#2166ac", "below normal": "#92c5de", "near normal": "#f7f7f7", "above normal": "#f4a582", "much above normal": "#b2182b" };
+  const CLASS_COLORS = pal.classes;
 
   /* ── E8: download the calendar as a PNG image ── */
   const downloadCalendarPng = () => {
@@ -1821,6 +1833,13 @@ export default function Vigil() {
       <div ref={containerRef} className="hd-map" />
       {/* Decorative MODIS / VIIRS orbits over the globe until a region is picked */}
       <OrbitOverlay mapRef={mapRef} ready={ready} visible={!selection && !flat} enterDelayMs={MORPH_MS} />
+      {/* Colour-blind mode: switches every colour of the interface (map, calendar, charts) to the CVD-safe palette */}
+      <button className={"hd-cvd" + (daltonien ? " on" : "")} onClick={() => setDaltonien(!daltonien)} aria-pressed={daltonien}
+        title={daltonien ? "Colour-blind mode on (click for standard colours)" : "Colour-blind mode"} aria-label="Colour-blind mode">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" />
+        </svg>
+      </button>
 
       {/* Toolbar */}
       {!split && <div className="hd-toolbar">
@@ -1878,9 +1897,9 @@ export default function Vigil() {
             })()}{moisCarte === partiel ? " · partial month" : ""}</span>
           </div>
           <div className="hd-mapkey-ramp" role="img" aria-label={`Colour scale: 12 classes from below ${DENS_BREAKS[metrique][0]} to ${DENS_BREAKS[metrique][10]} and more`}>
-            {HEX_COLORS.map((c, i) => {
+            {pal.hex.map((c, i) => {
               const br = DENS_BREAKS[metrique];
-              return <i key={c} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
+              return <i key={i} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
             })}
           </div>
           <div className="hd-mapkey-ticks hd-mono" aria-hidden="true">
@@ -1902,7 +1921,7 @@ export default function Vigil() {
           {selection?.region.pays && <div className="hd-mapkey-note">Map: hexagons with detections of this country (border hexagons also hold the neighbour&apos;s).</div>}
           {nPoints && (
             <div className="hd-mapkey-note hd-mapkey-pts">
-              <i style={{ background: "#22d3ee" }} />MODIS <i style={{ background: "#fde047" }} />VIIRS <i className="hollow" />not counted ·
+              <i style={{ background: pal.modis }} />MODIS <i style={{ background: pal.viirs }} />VIIRS <i className="hollow" />not counted ·
               {" "}{fmtInt(nPoints.total)} raw detections this month (all satellites, not harmonized), {fmtInt(nPoints.comptes)} counted as vegetation fires
             </div>
           )}
@@ -2006,22 +2025,22 @@ export default function Vigil() {
                   {yearTicks.map((y) => <text key={y} x={xAt(y - Y0)} y={H - 3} textAnchor="middle" className="hd-axis">{y}</text>)}
                   {xBascule !== null && (
                     <>
-                      <line x1={xBascule} x2={xBascule} y1={mt} y2={mt + ph} stroke="#dc2626" strokeDasharray="3 3" opacity={0.6} />
+                      <line x1={xBascule} x2={xBascule} y1={mt} y2={mt + ph} stroke={pal.alert} strokeDasharray="3 3" opacity={0.6} />
                       <text x={xBascule + (vueEff === "naif_2012" ? 4 : -4)} y={mt + 8} textAnchor={vueEff === "naif_2012" ? "start" : "end"} className="hd-annot">{vueEff === "harmonise" ? "VIIRS converted →" : "raw VIIRS →"}</text>
                     </>
                   )}
-                  <path d={pathOf(line)} fill="none" stroke="#ea580c" strokeWidth={2.2} strokeLinejoin="round" />
+                  <path d={pathOf(line)} fill="none" stroke={pal.accent} strokeWidth={2.2} strokeLinejoin="round" />
 
                   {hoverYear !== null && line[hoverYear] != null && (
                     <g>
                       <line x1={xAt(hoverYear)} x2={xAt(hoverYear)} y1={mt} y2={mt + ph} stroke="#0f172a" opacity={0.25} />
-                      <circle cx={xAt(hoverYear)} cy={yAt(line[hoverYear]!)} r={3.5} fill="#ea580c" stroke="#fff" strokeWidth={1.2} />
+                      <circle cx={xAt(hoverYear)} cy={yAt(line[hoverYear]!)} r={3.5} fill={pal.accent} stroke="#fff" strokeWidth={1.2} />
                     </g>
                   )}
                   <rect x={ml} y={mt} width={pw} height={ph} fill="transparent" onMouseMove={onChartMove} onMouseLeave={() => setHoverYear(null)} />
                 </svg>
                 <div className="hd-chart-legend">
-                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>{vueEff === "harmonise" ? "Harmonized, MODIS-Aqua eq." : vueEff === "naif_2012" ? "Raw, naive splice 2012" : "Raw, switch Nov 2020 (not converted)"}</span>
+                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke={pal.accent} strokeWidth="2.4" /></svg>{vueEff === "harmonise" ? "Harmonized, MODIS-Aqua eq." : vueEff === "naif_2012" ? "Raw, naive splice 2012" : "Raw, switch Nov 2020 (not converted)"}</span>
                   <span className="dim">complete years only</span>
                   {ytd && (
                     <span className="hd-mono hd-ytd" title="Year to date: the complete months of the current year, compared with the median (Hyndman–Fan type 8) of the same months over 2003–2025">
@@ -2127,8 +2146,8 @@ export default function Vigil() {
 /* Styles                                                                     */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-const CSS = `
-.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#000000;--mut:#000000;--or:#ea580c;--cr:#dc2626;--gr:#16a34a;
+const CSS = PALETTE_CSS + `
+.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#000000;--mut:#000000;
   position:fixed;inset:0;overflow:hidden;background:var(--bg2);color:var(--tx);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
   font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;color-scheme:light}
 .hd-root *{box-sizing:border-box}
@@ -2136,6 +2155,10 @@ const CSS = `
 .hd-root button{font:inherit;color:inherit;cursor:pointer}
 .hd-root button:focus-visible{outline:2px solid var(--or);outline-offset:2px}
 .hd-map{position:absolute;inset:0}
+.hd-cvd{position:absolute;right:42px;bottom:4px;z-index:7;width:24px;height:24px;border-radius:999px;border:0;padding:0;display:grid;place-items:center;
+  background:rgba(255,255,255,.85);color:#000;box-shadow:0 2px 8px rgba(15,23,42,.18)}
+.hd-cvd:hover{background:#fff}
+.hd-cvd.on{background:var(--or);color:#fff}
 .hd-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-variant-numeric:tabular-nums}
 
 .hd-toolbar{position:absolute;top:12px;left:12px;right:60px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;pointer-events:none;z-index:5}
@@ -2204,7 +2227,7 @@ const CSS = `
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
 .hd-heat-legend{grid-column:1 / -1;display:flex;align-items:center;gap:6px;margin-top:4px;font-size:9.5px;color:var(--mut)}
-.hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:linear-gradient(90deg,#e8edf3,rgb(254,243,199) 4%,rgb(252,211,77) 25%,rgb(251,146,60) 50%,rgb(234,88,12) 72%,rgb(220,38,38) 88%,rgb(127,29,29))}
+.hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:var(--heat-grad)}
 .hd-cell.out{opacity:.35}
 .hd-cell.sel{outline:1.5px solid var(--tx);outline-offset:0;position:relative;z-index:1}
 .hd-cell:hover{outline:1px solid var(--tx);outline-offset:0;position:relative;z-index:1}
@@ -2212,7 +2235,7 @@ const CSS = `
 .hd-chart-wrap{position:relative}
 .hd-chart{width:100%;height:auto;display:block}
 .hd-axis{font-size:9px;fill:#000000;font-variant-numeric:tabular-nums}
-.hd-annot{font-size:9px;fill:#b91c1c;font-weight:600}
+.hd-annot{font-size:9px;fill:var(--cr);font-weight:600}
 .hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#000000;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
 .hd-chart-legend span{display:inline-flex;align-items:center;gap:5px}
 .hd-hover-read{margin-left:auto;color:var(--tx)}
@@ -2278,7 +2301,7 @@ const CSS = `
 .hd-analysis-title{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
 .hd-analysis-soon{font-size:11px;color:var(--mut);font-style:italic}
 .hd-rc-export{width:100%;background:var(--or);color:#fff;border:0;border-radius:7px;padding:9px;font-weight:650;font-size:13px}
-.hd-rc-export:hover{background:#c2410c}
+.hd-rc-export:hover{background:var(--or-dk)}
 .hd-rc-simnote{font-size:10px;color:var(--mut);text-align:center;margin:4px 0 0;font-style:italic}
 
 @media (max-width:900px){
@@ -2313,7 +2336,7 @@ const CSS = `
 .hd-calview-tabs{display:flex;gap:3px;padding:3px;border-radius:9px;background:rgba(15,23,42,.06)}
 .hd-calview-tabs button{flex:1;border:0;background:transparent;padding:5px 4px;border-radius:7px;font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;white-space:nowrap}
 .hd-calview-tabs button.on{background:#0f172a;color:#fff}
-.hd-calview-tabs button:focus-visible{outline:2px solid #ea580c;outline-offset:1px}
+.hd-calview-tabs button:focus-visible{outline:2px solid var(--or);outline-offset:1px}
 .hd-calview-note{margin:0;font-size:10.5px;line-height:1.35;color:var(--mut)}
 .hd-ramp-lbl{font-variant-numeric:tabular-nums}
 /* ── E7 block and PNG button ── */
@@ -2332,7 +2355,7 @@ const CSS = `
 .hd-zone-note.inline{margin:0 0 0 12px}
 .hd-cell.partial{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)!important}
 .hd-heat-partial{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
-.hd-heat-partial b{width:10px;height:6px;border-radius:1px;background:#fb923c repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)}
+.hd-heat-partial b{width:10px;height:6px;border-radius:1px;background:var(--heat-mid) repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)}
 .hd-tip-sep{height:1px;background:rgba(148,163,184,.3);margin:5px 0}
 .hd-tip-note{font-size:10.5px;color:#fbbf24;margin-top:2px}
 .hd-popup small{color:var(--mut);font-weight:400}

@@ -18,6 +18,7 @@ import {
 import { cleMois, indiceMois, type IndexV2, type Ring } from "./donnees";
 import type { Metrique, MoisZone, SerieZone } from "./zone";
 import * as S from "./stats";
+import { usePalette } from "./palette";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const B0 = S.BASE_Y0, B1 = S.BASE_Y1;
@@ -49,11 +50,9 @@ const nameOf = (m: Metrique) => (m === "hotspots" ? "Hotspots" : "Σ FRP");
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const monthSpan = (a: number, b: number) => (a === b ? MONTHS[a] : `${MONTHS[a]}–${MONTHS[b]}`);
 
-/** Diverging RdBu (ColorBrewer, 9 classes), reversed: blue = below the median, red = above. Colour-blind safe. */
-const DIV = ["#2166ac", "#4393c3", "#92c5de", "#d1e5f0", "#f7f7f7", "#fddbc7", "#f4a582", "#d6604d", "#b2182b"];
-const DIV_TEXT = (c: number) => (c <= 1 || c >= 7 ? "#ffffff" : "#0f172a");
+/** Diverging 9-class scale from the palette (app/palette.ts): RdBu reversed (blue = below the median, red = above),
+ *  or PuOr (purple = below, orange = above) in colour-blind mode. */
 const NEUTRAL = "#e9ecef";
-const CLASS_COLORS: Record<string, string> = { "much below normal": "#2166ac", "below normal": "#92c5de", "near normal": "#f7f7f7", "above normal": "#f4a582", "much above normal": "#b2182b" };
 const EDGE_RATIOS = S.ANOMALY_EDGES.map((e) => 2 ** e);
 
 /* ── Accessible definition tooltip (hover + keyboard focus) ───────────── */
@@ -175,7 +174,8 @@ interface CommonProps {
 }
 
 function ClassBadge({ cls }: { cls: string }) {
-  return <span className="dd-badge" style={{ background: CLASS_COLORS[cls], color: cls.startsWith("much") ? "#fff" : "#0f172a" }}>{cls}</span>;
+  const pal = usePalette();
+  return <span className="dd-badge" style={{ background: pal.classes[cls], color: cls.startsWith("much") ? "#fff" : "#0f172a" }}>{cls}</span>;
 }
 
 function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: Grids }) {
@@ -266,6 +266,7 @@ function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: 
 type Tip = { kind: "cell" | "annual" | "median" | "medianAnnual"; y: number; m: number; pos: Pop };
 
 function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNote, onPick }: CommonProps & { smallZone: boolean; frpBandNote: boolean; onPick?: (y: number, m: number) => void }) {
+  const pal = usePalette(), DIV = pal.div, DIV_TEXT = pal.divText;
   const [tip, setTip] = useState<Tip | null>(null);
   const [kbd, setKbd] = useState<{ y: number; m: number }>(focus);
   useEffect(() => setKbd(focus), [focus.y, focus.m]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -356,7 +357,7 @@ function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNot
 
       <div className="dd-legend" aria-label="Colour legend">
         <span className="dd-leg-ramp">
-          {DIV.map((c, i) => <i key={c} style={{ background: c }} title={i === 0 ? `≤ ${EDGE_RATIOS[0].toFixed(2)}× median (incl. 0)` : i === 8 ? `> ${EDGE_RATIOS[7].toFixed(2)}× median` : `${EDGE_RATIOS[i - 1].toFixed(2)}–${EDGE_RATIOS[i].toFixed(2)}× median`} />)}
+          {DIV.map((c, i) => <i key={i} style={{ background: c }} title={i === 0 ? `≤ ${EDGE_RATIOS[0].toFixed(2)}× median (incl. 0)` : i === 8 ? `> ${EDGE_RATIOS[7].toFixed(2)}× median` : `${EDGE_RATIOS[i - 1].toFixed(2)}–${EDGE_RATIOS[i].toFixed(2)}× median`} />)}
         </span>
         <span className="dd-leg-ticks">
           <span>¼×</span><span>½×</span><span>1× (0.84–1.19)</span><span>2×</span><span>4×</span>
@@ -445,6 +446,7 @@ function CalTip({ tip, g, metrique, mz, bandOf, meds, annMed, smallZone, frpBand
 const tipStyle: React.CSSProperties = { fontSize: 11, background: "#fff", border: "1px solid #e2e8f0", color: "#0f172a", borderRadius: 6, boxShadow: "0 8px 24px rgba(15,23,42,.25)", padding: "6px 9px" };
 
 function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; index: IndexV2 }) {
+  const pal = usePalette();
   const u = unitOf(metrique);
   const pts = S.annualPoints(g);
   const base = S.annualBaseline(g);
@@ -476,10 +478,10 @@ function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; in
             <YAxis tick={{ fontSize: 10, fill: "#000" }} tickLine={false} axisLine={false} width={42} tickFormatter={(v: number) => fmtC(v)} />
             {ok && <ReferenceArea y1={p10} y2={p90} fill="#94a3b8" fillOpacity={0.18} stroke="none" ifOverflow="extendDomain" />}
             {ok && <ReferenceLine y={med} stroke="#475569" strokeDasharray="4 3" label={{ value: `median ${fmtC(med)}`, position: "insideTopLeft", fontSize: 10, fill: "#334155" }} />}
-            <ReferenceLine x={xSwitch} stroke="#b91c1c" strokeDasharray="3 3" label={{ value: "VIIRS converted →", position: "insideTopRight", fontSize: 10, fill: "#b91c1c" }} />
+            <ReferenceLine x={xSwitch} stroke={pal.alert} strokeDasharray="3 3" label={{ value: "VIIRS converted →", position: "insideTopRight", fontSize: 10, fill: pal.alert }} />
             <Line dataKey="sen" stroke="#64748b" strokeWidth={1} strokeDasharray="6 4" dot={false} isAnimationActive={false} connectNulls={false} />
-            <Line dataKey="full" stroke="#ea580c" strokeWidth={2} dot={{ r: 2.5, fill: "#ea580c", stroke: "#ea580c" }} isAnimationActive={false} connectNulls={false} />
-            <Line dataKey="part" stroke="none" dot={{ r: 4, fill: "#ffffff", stroke: "#ea580c", strokeWidth: 1.6 }} activeDot={{ r: 5, fill: "#ffffff", stroke: "#ea580c" }} isAnimationActive={false} />
+            <Line dataKey="full" stroke={pal.accent} strokeWidth={2} dot={{ r: 2.5, fill: pal.accent, stroke: pal.accent }} isAnimationActive={false} connectNulls={false} />
+            <Line dataKey="part" stroke="none" dot={{ r: 4, fill: "#ffffff", stroke: pal.accent, strokeWidth: 1.6 }} activeDot={{ r: 5, fill: "#ffffff", stroke: pal.accent }} isAnimationActive={false} />
             <Tooltip contentStyle={tipStyle} content={({ active, payload }) => {
               if (!active || !payload?.length) return null;
               const d = payload[0].payload as (typeof data)[number];
@@ -509,6 +511,7 @@ function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; in
 /* ── FRP block ─────────────────────────────────────────────────────────── */
 
 function FrpBlock({ grids, focusY }: { grids: Grids; focusY: number }) {
+  const pal = usePalette();
   const data = MONTHS.map((name, m) => {
     const f = S.summarize(S.monthBaseline(grids.frp, m));
     const i = S.summarize(S.monthBaseline(grids.inten, m));
@@ -526,8 +529,8 @@ function FrpBlock({ grids, focusY }: { grids: Grids; focusY: number }) {
           <CartesianGrid stroke="rgba(15,23,42,.12)" strokeDasharray="2 2" vertical={false} />
           <XAxis dataKey="name" tick={{ fontSize: 9, fill: "#000" }} tickLine={false} axisLine={false} interval={0} tickFormatter={(v: string) => v[0]} />
           <YAxis tick={{ fontSize: 9, fill: "#000" }} tickLine={false} axisLine={false} width={40} tickFormatter={fmt} />
-          <Area dataKey={iqr} stroke="none" fill="#ea580c" fillOpacity={0.18} isAnimationActive={false} />
-          <Line dataKey={med} stroke="#ea580c" strokeWidth={2} dot={{ r: 2 }} isAnimationActive={false} />
+          <Area dataKey={iqr} stroke="none" fill={pal.accent} fillOpacity={0.18} isAnimationActive={false} />
+          <Line dataKey={med} stroke={pal.accent} strokeWidth={2} dot={{ r: 2 }} isAnimationActive={false} />
           <Line dataKey={foc} stroke="#0f172a" strokeWidth={0} dot={{ r: 2.6, fill: "#0f172a" }} isAnimationActive={false} />
           <Tooltip content={({ active, payload }) => {
             if (!active || !payload?.length) return null;
@@ -745,7 +748,7 @@ const DD_CSS = `
 .dd-sec-title{font-size:10.5px;font-weight:750;text-transform:uppercase;letter-spacing:.07em;color:#0f172a}
 .dd-hint{font-size:10px;color:#475569}
 .dd-def{cursor:help;border-bottom:1px dotted rgba(15,23,42,.45);outline:none;border-radius:2px}
-.dd-def:focus-visible{outline:2px solid #ea580c;outline-offset:2px}
+.dd-def:focus-visible{outline:2px solid var(--or);outline-offset:2px}
 .dd-pop{position:fixed;z-index:80;background:#fff;color:#0f172a;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font:12px/1.4 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(15,23,42,.25);pointer-events:none;text-transform:none;letter-spacing:0;font-weight:400}
 .dd-tt{font-weight:700;margin-bottom:4px;font-family:ui-monospace,Menlo,monospace}
 .dd-tr{display:flex;justify-content:space-between;gap:10px;padding:1px 0}
@@ -766,7 +769,7 @@ const DD_CSS = `
 .dd-ann small{font-size:9px;opacity:.85}
 .dd-ann-h{text-align:right;padding-right:4px}
 .dd-nodata{background:repeating-linear-gradient(45deg,#f1f5f9 0 3px,#d9dee5 3px 4px);cursor:default}
-.dd-partial{background:#fff7ed repeating-linear-gradient(45deg,rgba(234,88,12,.28) 0 2px,transparent 2px 5px);color:#7c2d12;font-style:italic}
+.dd-partial{background:#fff7ed repeating-linear-gradient(45deg,color-mix(in srgb,var(--or) 28%,transparent) 0 2px,transparent 2px 5px);color:#7c2d12;font-style:italic}
 .dd-focus{box-shadow:inset 0 0 0 2px #0f172a!important;font-weight:800}
 .dd-legend{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;font-size:10.5px;color:#1e293b;margin-top:4px}
 .dd-leg-ramp{display:inline-flex}
@@ -780,10 +783,10 @@ const DD_CSS = `
 .dd-chart-leg{display:flex;flex-wrap:wrap;gap:12px;font-size:10.5px;color:#1e293b}
 .dd-chart-leg span{display:inline-flex;align-items:center;gap:5px}
 .dd-chart-leg i{display:inline-block}
-.dd-l-line{width:18px;height:2px;background:#ea580c}
-.dd-l-hollow{width:9px;height:9px;border-radius:50%;border:1.6px solid #ea580c;background:#fff}
+.dd-l-line{width:18px;height:2px;background:var(--or)}
+.dd-l-hollow{width:9px;height:9px;border-radius:50%;border:1.6px solid var(--or);background:#fff}
 .dd-l-band{width:16px;height:9px;background:rgba(148,163,184,.4)}
-.dd-l-or{background:rgba(234,88,12,.25)}
+.dd-l-or{background:color-mix(in srgb,var(--or) 25%,transparent)}
 .dd-l-dash{width:18px;border-top:1.5px dashed #64748b}
 .dd-l-dot{width:6px;height:6px;border-radius:50%;background:#0f172a}
 .dd-frp2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
@@ -798,11 +801,11 @@ const DD_CSS = `
 .dd-strong{font-weight:750}
 .dd-secondary{color:#64748b}
 .dd-table thead th.dd-secondary{color:#64748b}
-.dd-focus-col{background:rgba(234,88,12,.06)}
+.dd-focus-col{background:color-mix(in srgb,var(--or) 6%,transparent)}
 .dd-row-focus{background:rgba(15,23,42,.06)}
 .dd-row-annual th,.dd-row-annual td{border-top:1px solid rgba(15,23,42,.3);font-weight:650}
 .dd-tag{margin-left:5px;font-size:8.5px;font-weight:700;text-transform:uppercase;color:#9a3412;background:#ffedd5;border-radius:3px;padding:0 3px}
-.dd-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ea580c;margin-left:5px;vertical-align:middle}
+.dd-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--or);margin-left:5px;vertical-align:middle}
 .dd-partial-txt{font-style:italic;color:#9a3412}
 .dd-wx{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
 @media (max-width:1100px){.dd-grid{grid-template-columns:minmax(0,1fr)}.dd-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
