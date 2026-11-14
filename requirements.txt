@@ -3,3 +3,5 @@ numpy
 pyarrow
 shapely>=2
 pytest
+duckdb>=1.1
+h3>=4.0
