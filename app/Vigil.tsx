@@ -318,6 +318,8 @@ const ZOOM_RES4 = 1.2;
 const ZOOM_RES5 = 5.0;
 /** Display resolution by zoom: the mesh stays visible at every scale (res-5 children summed into their parent: exact). */
 const resPourZoom = (z: number) => (z < ZOOM_RES4 ? 3 : z < ZOOM_RES5 ? 4 : 5);
+/** Minimum zoom for the hexagon tooltip on hover (opening view = 2.4): below it, the globe overview stays clear. A click still opens it. */
+const ZOOM_MIN_INFOBULLE = 3.2;
 const TAILLE_RES: Record<number, string> = { 3: "~110 km", 4: "~42 km", 5: "~17 km" };
 const AIRE = new Map<string, number>();
 const aireKm2 = (h: string) => { let a = AIRE.get(h); if (a === undefined) AIRE.set(h, (a = cellArea(h, "km2"))); return a; };
@@ -1570,7 +1572,7 @@ export default function Vigil() {
 
       // Hexagon tooltip on hover (click also opens it: touch screens)
       const survol = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10, className: "hd-popup", maxWidth: "300px" });
-      let ixPays: IndexPays | null = null, ixPaysCharge = false, dernierH3 = "";
+      let ixPays: IndexPays | null = null, ixPaysCharge = false, dernierH3 = "", dernierClic = false;
       const montrer = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         if (map.getLayer("pts") && map.queryRenderedFeatures(e.point, { layers: ["pts"] }).length) return; // a detection is under the cursor
@@ -1611,12 +1613,15 @@ export default function Vigil() {
         if (!survol.isOpen()) survol.addTo(map);
       };
       const montrerThrottled = (e: MapLayerMouseEvent) => {
+        if (map && map.getZoom() < ZOOM_MIN_INFOBULLE) { if (survol.isOpen() && !dernierClic) { survol.remove(); dernierH3 = ""; } return; }
         if (mapMovingRef.current) return;
         if (hoverRaf) return;
         const eCopy = e;
-        hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; montrer(eCopy); });
+        hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; dernierClic = false; montrer(eCopy); });
       };
       map.on("mousemove", "hex", montrerThrottled);
+      // Zooming back out below the threshold closes a hover tooltip
+      map.on("zoom", () => { if (map && map.getZoom() < ZOOM_MIN_INFOBULLE && survol.isOpen() && !dernierClic) { survol.remove(); dernierH3 = ""; } });
       const montrerPoint = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const q = e.features[0].properties as { date: string; heure: string; sat: string; dn: string; conf: string; frp: number | null; cat: string; compte: boolean; origine: string; lat: number; lon: number };
@@ -1644,9 +1649,9 @@ export default function Vigil() {
       map.on("mousemove", "pts", montrerPoint);
       map.on("click", "pts", montrerPoint);
       map.on("mouseleave", "pts", () => { if (map && toolRef.current === "none") { survol.remove(); dernierH3 = ""; } });
-      map.on("click", "hex", montrer);
+      map.on("click", "hex", (e) => { dernierH3 = ""; montrer(e); dernierClic = survol.isOpen(); });
       map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "crosshair"; });
-      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; survol.remove(); dernierH3 = ""; });
+      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; survol.remove(); dernierH3 = ""; dernierClic = false; });
 
       // Map position -> real [lon, lat] (the map draws warped latitudes in Gall-Peters)
       const reel = (ll: { lng: number; lat: number }): [number, number] => [ll.lng, gpActifRef.current ? gpDeCarte(ll.lat) : ll.lat];
