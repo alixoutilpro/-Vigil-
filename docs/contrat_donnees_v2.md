@@ -58,8 +58,11 @@ Tableaux alignés mois par mois à partir de `premier_mois`. Noms de pays = noms
 ### `incertitude.json` — fourchette d'une zone quelconque
 Pour un **total de zone** `x` d'un mois converti : classe `c` selon `classes_bornes`, puis
 `bas = max(0, exp(log(1+x) + q_bas[c]) − 1)`, `haut = exp(log(1+x) + q_haut[c]) − 1` (niveau `"0.8"` ou `"0.95"`).
-Mois observés par Aqua : `bas = haut = x`. **Validé à l'échelle pays × mois** : sous cette échelle, afficher
-« fourchette indicative (non validée pour une petite zone) ».
+Mois observés par Aqua : `bas = haut = x`.
+**Quelle table ?** mode Pays → `hotspots` (validée pays × mois) ; zone dessinée ou mode H3 → **`hotspots_sous_pays`**
+(apprise et vérifiée sur des zones de ~55 à ~220 km : couverture observée 78–81 % pour 80 %, 94–95 % pour 95 %).
+Pour une zone de moins de ~3 hexagones, afficher « fourchette indicative (zone plus petite que les zones testées) ».
+FRP → `frp_MW` (validée pays × mois uniquement).
 
 ### `points_grece/AAAA.csv.gz` — chaque détection grecque (E9)
 Colonnes : `latitude, longitude, acq_date, acq_time, satellite, instrument, daynight, confidence, frp, type, categorie,

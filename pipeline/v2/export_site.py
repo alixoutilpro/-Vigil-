@@ -151,6 +151,12 @@ def exporter_incertitude(dossier, site):
                         "quantiles": rc["incertitude"]["quantiles"], "couverture_observee": rc["incertitude"]["couverture_observee"]},
            "frp_MW": {"classes_bornes": rf["incertitude"]["classes_MW"], "quantiles": rf["incertitude"]["quantiles"],
                       "couverture_observee": rf["incertitude"]["couverture_observee"]}}
+    sp = os.path.join(dossier, "incertitude_sous_pays.json")      # etudes/validation_sous_pays.py
+    if os.path.exists(sp):
+        s = json.load(open(sp, encoding="utf-8"))
+        inc["hotspots_sous_pays"] = {"usage": "zones dessinees / mode H3 (sous l'echelle du pays)", "valide_pour": s["valide_pour"],
+                                     "classes_bornes": s["classes_bornes"], "noms": s["noms"], "quantiles": s["quantiles"],
+                                     "couverture_observee": s["couverture"]}
     ch = os.path.join(site, "incertitude.json")
     with open(ch, "w", encoding="utf-8") as f:
         json.dump(inc, f, ensure_ascii=False, indent=1)
