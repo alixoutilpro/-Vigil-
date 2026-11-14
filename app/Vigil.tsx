@@ -16,6 +16,7 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
+import OrbitOverlay from "./OrbitOverlay";
 import {
   BASE, ErreurDonnees, centreHex, chargerIncertitude, chargerIndex, chargerMois, chargerPays, chargerTuile,
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
@@ -203,6 +204,41 @@ const COUNTRIES: Array<{ name: string; bbox: [number, number, number, number] }>
   { name: "Zimbabwe", bbox: [-22.4, -15.6, 25.2, 33.1] },
 ];
 
+/** Continents and large fire regions (not FIRMS countries: always studied in hexagon mode). */
+const REGIONS: Array<{ name: string; bbox: [number, number, number, number] }> = [
+  { name: "Africa", bbox: [-35.0, 37.5, -18.0, 52.0] },
+  { name: "Europe", bbox: [35.0, 71.5, -25.0, 45.0] },
+  { name: "Asia", bbox: [-11.0, 77.0, 25.0, 180.0] },
+  { name: "North America", bbox: [7.0, 72.0, -168.0, -52.0] },
+  { name: "South America", bbox: [-56.0, 13.0, -82.0, -34.0] },
+  { name: "Oceania", bbox: [-48.0, 0.0, 110.0, 180.0] },
+  { name: "Mediterranean Basin", bbox: [30.0, 46.0, -10.0, 37.0] },
+  { name: "Sahel", bbox: [10.0, 20.0, -17.0, 40.0] },
+  { name: "Amazon", bbox: [-18.0, 5.0, -79.0, -44.0] },
+  { name: "Cerrado", bbox: [-24.0, -2.0, -60.0, -41.0] },
+  { name: "Gran Chaco", bbox: [-33.0, -17.0, -67.0, -57.0] },
+  { name: "Congo Basin", bbox: [-8.0, 6.0, 12.0, 31.0] },
+  { name: "Miombo (Southern Africa)", bbox: [-20.0, -5.0, 12.0, 40.0] },
+  { name: "Siberia", bbox: [50.0, 75.0, 60.0, 180.0] },
+  { name: "Boreal Canada", bbox: [49.0, 70.0, -141.0, -55.0] },
+  { name: "Alaska", bbox: [51.0, 71.5, -168.0, -130.0] },
+  { name: "California", bbox: [32.5, 42.0, -124.5, -114.1] },
+  { name: "Iberian Peninsula", bbox: [36.0, 43.8, -9.5, 3.3] },
+  { name: "Balkans", bbox: [39.5, 46.5, 13.5, 29.7] },
+  { name: "Indo-Gangetic Plain", bbox: [24.0, 32.5, 72.0, 88.5] },
+  { name: "Mainland Southeast Asia", bbox: [8.5, 28.5, 92.0, 109.5] },
+  { name: "Borneo", bbox: [-4.2, 7.1, 108.8, 119.3] },
+  { name: "Sumatra", bbox: [-6.0, 6.0, 95.0, 106.1] },
+  { name: "Northern Australia", bbox: [-23.0, -10.7, 113.3, 153.6] },
+  { name: "Patagonia", bbox: [-55.1, -37.5, -75.6, -62.0] },
+];
+
+type Lieu = { name: string; bbox: [number, number, number, number]; kind: "Country" | "Region" };
+const LIEUX: Lieu[] = [
+  ...COUNTRIES.map((c) => ({ ...c, kind: "Country" as const })),
+  ...REGIONS.map((r) => ({ ...r, kind: "Region" as const })),
+];
+
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Utilities                                                                  */
@@ -222,7 +258,7 @@ function fmtCompact(n: number): string {
   return String(Math.round(n));
 }
 /** Value with one decimal under 10 (converted totals are not integers). */
-const fmtVal = (n: number) => (Math.abs(n) < 10 && n % 1 ? n.toFixed(1) : fmtInt(n));
+const fmtVal = (n: number) => (n !== 0 && Math.abs(n) < 1 ? String(Number(n.toPrecision(2))) : Math.abs(n) < 10 && n % 1 ? n.toFixed(1) : fmtInt(n));
 const unit = (m: Metrique) => (m === "hotspots" ? "detections" : "MW");
 const LIB_FIAB: Record<string, string> = { elevee: "high", moyenne: "medium", faible: "low" };
 
@@ -277,7 +313,7 @@ interface HexFeature {
 type HexCollection = { type: "FeatureCollection"; features: HexFeature[] };
 
 /** Display resolution by zoom: the mesh stays visible at every scale (res-5 children summed into their parent: exact). */
-const resPourZoom = (z: number) => (z < 1.6 ? 3 : z < 3.6 ? 4 : 5);
+const resPourZoom = (z: number) => (z < 1.2 ? 3 : z < 3.6 ? 4 : 5);
 const TAILLE_RES: Record<number, string> = { 3: "~110 km", 4: "~42 km", 5: "~17 km" };
 const AIRE = new Map<string, number>();
 const aireKm2 = (h: string) => { let a = AIRE.get(h); if (a === undefined) AIRE.set(h, (a = cellArea(h, "km2"))); return a; };
@@ -465,30 +501,6 @@ function heatColor(t: number): string {
   }
   return "rgb(127,29,29)";
 }
-/** Diverging blue → white → red scale of the "warming stripes" (ColorBrewer RdBu, 9 classes). */
-const STRIPE_STOPS: [number, number, number][] = [
-  [8, 48, 107], [33, 102, 172], [67, 147, 195], [146, 197, 222], [247, 247, 247],
-  [253, 219, 199], [244, 165, 130], [214, 96, 77], [178, 24, 43], [103, 0, 13],
-];
-/** t in [-1, 1]: -1 = far fewer fires than the region's average year, +1 = far more. */
-function stripeColor(t: number): string {
-  const x = ((clamp(t, -1, 1) + 1) / 2) * (STRIPE_STOPS.length - 1);
-  const i = Math.min(Math.floor(x), STRIPE_STOPS.length - 2), f = x - i;
-  const [a, b] = [STRIPE_STOPS[i], STRIPE_STOPS[i + 1]];
-  return `rgb(${a.map((c, k) => Math.round(c + (b[k] - c) * f)).join(",")})`;
-}
-/**
- * One colour per year from the annual fire totals of the region: centred on the mean year,
- * scaled by the largest deviation, so the palest stripe is a typical year and the darkest
- * red / blue are the most / least active years. Years without data stay null (grey).
- */
-function stripeColors(annual: AnnualPt[]): (string | null)[] {
-  const vs = annual.map((p) => p.value).filter((v): v is number => v !== null);
-  if (!vs.length) return annual.map(() => null);
-  const mean = vs.reduce((a, b) => a + b, 0) / vs.length;
-  const dev = Math.max(...vs.map((v) => Math.abs(v - mean))) || 1;
-  return annual.map((p) => (p.value === null ? null : stripeColor((p.value - mean) / dev)));
-}
 
 function niceTicks(max: number, n = 3): number[] {
   if (max <= 0) return [0, 1];
@@ -520,10 +532,62 @@ function Seg<T extends string>(props: { label: string; value: T; options: { v: T
 const bboxToSizeKm = (bbox: [number, number, number, number]) =>
   Math.round((bbox[1] - bbox[0]) * 111.32 * 10) / 10;
 
+type CoordErr = { latMax: string; lonMax: string; sizeKm: string };
+/** Square box whose north-east corner is (lat max, lon max), `size` km a side; errors per field when invalid. */
+function bboxFromCorner(latMax: string, lonMax: string, sizeKm: string): { err: CoordErr; bbox: [number, number, number, number] | null } {
+  const lat1 = parseFloat(latMax), lon1 = parseFloat(lonMax), sz = parseFloat(sizeKm);
+  const err: CoordErr = { latMax: "", lonMax: "", sizeKm: "" };
+  if (isNaN(lat1) || lat1 < -90 || lat1 > 90) err.latMax = "Must be −90 to 90";
+  if (isNaN(lon1) || lon1 < -180 || lon1 > 180) err.lonMax = "Must be −180 to 180";
+  if (isNaN(sz) || sz <= 0 || sz > 20000) err.sizeKm = "Must be 1–20 000";
+  if (err.latMax || err.lonMax || err.sizeKm) return { err, bbox: null };
+  const latSpan = sz / 111.32;
+  const lonSpan = sz / (111.32 * Math.cos(lat1 * Math.PI / 180));
+  return { err, bbox: [Math.max(-90, lat1 - latSpan), lat1, lon1 - lonSpan, lon1] };
+}
+
+/** Lon max / Lat max / Size (km) inputs, shared by the region card and the search panel. */
+function CoordFields({ idPrefix, latMax, lonMax, sizeKm, setLatMax, setLonMax, setSizeKm, err, onEnter }: {
+  idPrefix: string; latMax: string; lonMax: string; sizeKm: string;
+  setLatMax: (v: string) => void; setLonMax: (v: string) => void; setSizeKm: (v: string) => void;
+  err: CoordErr; onEnter: () => void;
+}) {
+  return (
+    <div className="hd-rc-grid3">
+      {([
+        { id: "lonMax", label: "Lon max", val: lonMax, onChange: setLonMax, err: err.lonMax, step: "0.01" },
+        { id: "latMax", label: "Lat max", val: latMax, onChange: setLatMax, err: err.latMax, step: "0.01" },
+        { id: "sizeKm", label: "Size (km)", val: sizeKm, onChange: setSizeKm, err: err.sizeKm, step: "1" },
+      ] as Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string; step: string }>).map(({ id, label, val, onChange, err, step }) => (
+        <div key={id} className="hd-rc-field">
+          <label htmlFor={`${idPrefix}-${id}`} className="hd-rc-fieldlabel">{label}</label>
+          <input
+            id={`${idPrefix}-${id}`}
+            type="number"
+            step={step}
+            className={"hd-rc-fieldinput" + (err ? " err" : "")}
+            value={val}
+            aria-describedby={err ? `${idPrefix}-${id}-err` : undefined}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onEnter()}
+          />
+          {err && <span id={`${idPrefix}-${id}-err`} role="alert" className="hd-rc-fielderr">{err}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 interface RegionCardProps {
-  selection: { region: RegionDef; ring: Ring; wasPolygon: boolean };
+  /** Null for a new region opened from the search button (nothing on the map yet). */
+  selection: { region: RegionDef; ring: Ring; wasPolygon: boolean } | null;
+  /** Focus target of the search button. */
+  searchRef: React.RefObject<HTMLInputElement>;
+  /** A country or region picked in the search field. */
+  onPick: (l: Lieu) => void;
+  /** Escape in an empty search field. */
+  onSearchEscape: () => void;
   name: string;
-  onRename: (name: string) => void;
   range: DateRange;
   onRangeChange: (r: DateRange) => void;
   onApplyBbox: (bbox: [number, number, number, number], name: string) => void;
@@ -535,9 +599,8 @@ interface RegionCardProps {
   ready: boolean;
 }
 
-function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBbox, bornes, onExport, ready }: RegionCardProps) {
-  const { region, wasPolygon } = selection;
-
+/** Region name with its Rename button, shown once in the panel header. */
+function RegionName({ name, onRename }: { name: string; onRename: (name: string) => void }) {
   /* ── Rename ── */
   const [renaming, setRenaming] = useState(false);
   const [nameInput, setNameInput] = useState(name);
@@ -553,33 +616,74 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
   };
   const cancelRename = () => { setNameInput(name); setRenaming(false); };
 
+  return (
+    <div className="hd-rc-titlerow">
+      {renaming ? (
+        <input
+          ref={nameInputRef}
+          id="hd-rc-nameinput"
+          className="hd-rc-nameinput hd-mono"
+          value={nameInput}
+          maxLength={40}
+          aria-label="Region name"
+          onChange={(e) => setNameInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") cancelRename(); }}
+          onBlur={commitRename}
+        />
+      ) : (
+        <span className="hd-mono hd-name">{name}</span>
+      )}
+      {!renaming && (
+        <button
+          className="hd-rc-rename"
+          aria-label="Rename region"
+          onClick={() => { setNameInput(name); setRenaming(true); }}
+        >
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9.5 2.5l2 2-7 7H2.5v-2l7-7z" />
+          </svg>
+          Rename
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, ready }: RegionCardProps) {
+  const bboxSel = selection?.region.bbox ?? null;
+  const wasPolygon = !!selection?.wasPolygon;
+
+  /* ── Country / region search ── */
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [] as Lieu[];
+    // Names starting with the query first, then the ones containing it.
+    const hits = LIEUX.filter((l) => l.name.toLowerCase().includes(q));
+    return hits.sort((x, y) => Number(!x.name.toLowerCase().startsWith(q)) - Number(!y.name.toLowerCase().startsWith(q))).slice(0, 8);
+  }, [query]);
+  useEffect(() => { setActive(0); }, [query]);
+  const pick = (l: Lieu) => { setQuery(""); onPick(l); };
+
   /* ── Bbox inputs (lon max, lat max, size in km) ── */
-  const [latMax, setLatMax] = useState(region.bbox[1].toFixed(2));
-  const [lonMax, setLonMax] = useState(region.bbox[3].toFixed(2));
-  const [sizeKm, setSizeKm] = useState(bboxToSizeKm(region.bbox).toFixed(1));
+  const [latMax, setLatMax] = useState(bboxSel ? bboxSel[1].toFixed(2) : "");
+  const [lonMax, setLonMax] = useState(bboxSel ? bboxSel[3].toFixed(2) : "");
+  const [sizeKm, setSizeKm] = useState(bboxSel ? bboxToSizeKm(bboxSel).toFixed(1) : "100.0");
   const [bboxErr, setBboxErr] = useState({ latMax: "", lonMax: "", sizeKm: "" });
 
   useEffect(() => {
-    setLatMax(region.bbox[1].toFixed(2));
-    setLonMax(region.bbox[3].toFixed(2));
-    setSizeKm(bboxToSizeKm(region.bbox).toFixed(1));
+    if (!bboxSel) return;
+    setLatMax(bboxSel[1].toFixed(2));
+    setLonMax(bboxSel[3].toFixed(2));
+    setSizeKm(bboxToSizeKm(bboxSel).toFixed(1));
     setBboxErr({ latMax: "", lonMax: "", sizeKm: "" });
-  }, [region.bbox]);
+  }, [bboxSel]);
 
   const validateAndApplyBbox = () => {
-    const lat1 = parseFloat(latMax), lon1 = parseFloat(lonMax), sz = parseFloat(sizeKm);
-    const e = { latMax: "", lonMax: "", sizeKm: "" };
-    if (isNaN(lat1) || lat1 < -90 || lat1 > 90) e.latMax = "Must be −90 to 90";
-    if (isNaN(lon1) || lon1 < -180 || lon1 > 180) e.lonMax = "Must be −180 to 180";
-    if (isNaN(sz) || sz <= 0 || sz > 20000) e.sizeKm = "Must be 1–20 000";
-    setBboxErr(e);
-    if (!e.latMax && !e.lonMax && !e.sizeKm) {
-      const latSpan = sz / 111.32;
-      const lonSpan = sz / (111.32 * Math.cos(lat1 * Math.PI / 180));
-      const lat0 = Math.max(-90, lat1 - latSpan);
-      const lon0 = lon1 - lonSpan;
-      onApplyBbox([lat0, lat1, lon0, lon1], name);
-    }
+    const { err, bbox } = bboxFromCorner(latMax, lonMax, sizeKm);
+    setBboxErr(err);
+    if (bbox) onApplyBbox(bbox, name);
   };
 
   const hasErr = Object.values(bboxErr).some(Boolean);
@@ -615,6 +719,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   const handleExport = () => {
     setExportErr("");
+    if (!selection) { setExportErr("Search a country or region, or enter coordinates first."); return; }
     const csv = onExport();
     if (!csv) {
       setExportErr(ready ? "No data for this area and period." : "The zone is still loading.");
@@ -634,65 +739,52 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   return (
     <div className="hd-region-card">
-      {/* 1. Title + Rename */}
-      <div className="hd-rc-titlerow">
-        {renaming ? (
+      {/* 2. Country / region search */}
+      <div className="hd-rc-section">
+        <label htmlFor="hd-search-place" className="hd-rc-seclabel">Country or region</label>
+        <div className="hd-search-field">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+            <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
+          </svg>
           <input
-            ref={nameInputRef}
-            id="hd-rc-nameinput"
-            className="hd-rc-nameinput hd-mono"
-            value={nameInput}
-            maxLength={40}
-            aria-label="Region name"
-            onChange={(e) => setNameInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") cancelRename(); }}
-            onBlur={commitRename}
+            ref={searchRef}
+            id="hd-search-place"
+            className="hd-search-input"
+            placeholder="Search country or region…"
+            autoComplete="off"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { if (query) setQuery(""); else onSearchEscape(); }
+              else if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(matches.length - 1, i + 1)); }
+              else if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); }
+              else if (e.key === "Enter" && matches[active]) pick(matches[active]);
+            }}
           />
-        ) : (
-          <span className="hd-mono hd-name">{name}</span>
+          {query && <button className="hd-search-clear" onClick={() => setQuery("")} aria-label="Clear">×</button>}
+        </div>
+        {matches.length > 0 && (
+          <div className="hd-search-results" role="listbox">
+            {matches.map((l, i) => (
+              <button key={l.kind + l.name} role="option" aria-selected={i === active}
+                className={"hd-search-result" + (i === active ? " on" : "")}
+                onMouseEnter={() => setActive(i)} onClick={() => pick(l)}>
+                <span>{l.name}</span><span className="hd-search-kind">{l.kind}</span>
+              </button>
+            ))}
+          </div>
         )}
-        {!renaming && (
-          <button
-            className="hd-rc-rename"
-            aria-label="Rename region"
-            onClick={() => { setNameInput(name); setRenaming(true); }}
-          >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M9.5 2.5l2 2-7 7H2.5v-2l7-7z" />
-            </svg>
-            Rename
-          </button>
-        )}
+        {query.trim() && matches.length === 0 && <p className="hd-rc-note">No country or region matches “{query.trim()}”.</p>}
       </div>
 
-      {/* 2. Coordinates */}
+      {/* 3. Coordinates */}
       <div className="hd-rc-section">
         <div className="hd-rc-seclabel">Coordinates</div>
         {wasPolygon && (
           <p className="hd-rc-note">Editing coordinates converts the polygon to a rectangle</p>
         )}
-        <div className="hd-rc-grid3">
-          {([
-            { id: "lonMax", label: "Lon max", val: lonMax, onChange: setLonMax, err: bboxErr.lonMax, step: "0.01" },
-            { id: "latMax", label: "Lat max", val: latMax, onChange: setLatMax, err: bboxErr.latMax, step: "0.01" },
-            { id: "sizeKm", label: "Size (km)", val: sizeKm, onChange: setSizeKm, err: bboxErr.sizeKm, step: "1" },
-          ] as Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string; step: string }>).map(({ id, label, val, onChange, err, step }) => (
-            <div key={id} className="hd-rc-field">
-              <label htmlFor={`hd-bbox-${id}`} className="hd-rc-fieldlabel">{label}</label>
-              <input
-                id={`hd-bbox-${id}`}
-                type="number"
-                step={step}
-                className={"hd-rc-fieldinput" + (err ? " err" : "")}
-                value={val}
-                aria-describedby={err ? `hd-bbox-${id}-err` : undefined}
-                onChange={(e) => onChange(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && validateAndApplyBbox()}
-              />
-              {err && <span id={`hd-bbox-${id}-err`} role="alert" className="hd-rc-fielderr">{err}</span>}
-            </div>
-          ))}
-        </div>
+        <CoordFields idPrefix="hd-bbox" latMax={latMax} lonMax={lonMax} sizeKm={sizeKm}
+          setLatMax={setLatMax} setLonMax={setLonMax} setSizeKm={setSizeKm} err={bboxErr} onEnter={validateAndApplyBbox} />
         <button
           className="hd-rc-apply"
           aria-label="Apply coordinate changes to map"
@@ -703,7 +795,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         </button>
       </div>
 
-      {/* 3. Study period */}
+      {/* 4. Study period */}
       <div className="hd-rc-section">
         <div className="hd-rc-seclabel">Study period</div>
         <div className="hd-rc-rangerow">
@@ -740,7 +832,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
       </div>
 
-      {/* 4. Export CSV */}
+      {/* 5. Export CSV */}
       <div className="hd-rc-section">
         <button className="hd-rc-export" aria-label="Export hotspots as CSV" onClick={handleExport}>
           Export CSV
@@ -756,6 +848,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 /* ────────────────────────────────────────────────────────────────────────── */
 
 interface Selection { region: RegionDef; ring: Ring; wasPolygon: boolean }
+const NEW_REGION = "New region";
 type Tool = "none" | "box" | "poly";
 
 /** Hexagon mode refuses zones whose tiles would be too heavy to download (use country mode instead). */
@@ -839,14 +932,14 @@ export default function Vigil() {
   const [ready, setReady] = useState(false);
   const [tip, setTip] = useState<{ x: number; y: number; yi: number; m: number } | null>(null);
   const [hoverYear, setHoverYear] = useState<number | null>(null);
+  /** Region card opened from the search button while nothing is selected yet. */
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [newName, setNewName] = useState(NEW_REGION);
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const hexRef = useRef<HexCollection>({ type: "FeatureCollection", features: [] });
@@ -880,7 +973,9 @@ export default function Vigil() {
         setIndex(ix);
         setInc(ic);
         const last = cleMois(ix.mois[ix.mois.length - 1]);
-        setDate(last);
+        const partielIx = moisPartiel(ix);
+        const dernierComplet = partielIx === ix.mois[ix.mois.length - 1] && ix.mois.length > 1 ? cleMois(ix.mois[ix.mois.length - 2]) : last;
+        setDate(dernierComplet);
         setSelRange({ from: cleMois(ix.mois[0]), to: last });
       } catch (e) {
         if (vivant) setErreur(e instanceof ErreurDonnees ? `${e.url} (${e.statut})` : String((e as Error).message || e));
@@ -954,7 +1049,6 @@ export default function Vigil() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [vals]);
   const heatMax = useMemo(() => (serie ? heatMaxOf(serie.mois, metrique) : 1), [serie, metrique]);
-  const stripes = useMemo(() => stripeColors(annual), [annual]);
 
   const hexes = useMemo((): HexCollection => {
     if (!index) return { type: "FeatureCollection", features: [] };
@@ -1006,6 +1100,7 @@ export default function Vigil() {
     wasPolygon = false,
     resetRange = true,
   ) => {
+    setSearchOpen(false);
     setSelection({ region, ring, wasPolygon });
     setSelectionName(name ?? region.name);
     if (resetRange) setSelRange(fullRange());
@@ -1017,6 +1112,9 @@ export default function Vigil() {
   }, [fitTo, setDraft, fullRange]);
 
   const handleApplyBbox = useCallback((bbox: [number, number, number, number], currentName: string) => {
+    setSearchOpen(false);
+    // A new region not renamed yet is named after its corner.
+    if (currentName === NEW_REGION) currentName = `${fmtLat(bbox[1])} ${fmtLon(bbox[3])}`;
     const ring = rectRing(bbox);
     const newRegion = { ...regionFromRing(ring), name: currentName, bbox };
     applySelection(newRegion, ring, currentName, false, false);
@@ -1063,7 +1161,7 @@ export default function Vigil() {
       const maplibregl = (await import("maplibre-gl")).default;
       if (cancelled || !containerRef.current) return;
       map = new maplibregl.Map({
-        container: containerRef.current, style: SAT_STYLE, center: [12, 24], zoom: 2.1, maxPitch: 75,
+        container: containerRef.current, style: SAT_STYLE, center: [12, 24], zoom: 2.4, maxPitch: 75,
         attributionControl: { compact: true },
       });
       mapRef.current = map;
@@ -1404,35 +1502,23 @@ export default function Vigil() {
     </div>
   );
 
-  /* ── Country search ── */
-  const searchMatches = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return [] as typeof COUNTRIES;
-    return COUNTRIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8);
-  }, [searchQuery]);
-
-  const selectCountry = useCallback(async (c: { name: string; bbox: [number, number, number, number] }) => {
+  /* ── Search (country or region) ── */
+  const selectPlace = useCallback(async (l: Lieu) => {
     setSearchOpen(false);
-    setSearchQuery("");
-    const pays = await chargerPays().catch(() => null);
-    const ring = rectRing(c.bbox);
-    applySelection({ ...regionFromRing(ring), name: c.name, pays: clePays(c.name, pays) }, ring, c.name, false);
+    const pays = l.kind === "Country" ? await chargerPays().catch(() => null) : null;
+    const ring = rectRing(l.bbox);
+    // Keep the study period shown in the card.
+    applySelection({ ...regionFromRing(ring), name: l.name, pays: l.kind === "Country" ? clePays(l.name, pays) : undefined }, ring, l.name, false, false);
   }, [applySelection]);
 
-  useEffect(() => {
-    if (searchOpen) { searchInputRef.current?.focus(); chargerPays().catch(() => null); } // warm pays.json
-  }, [searchOpen]);
+  const toggleSearch = () => {
+    if (selection) { setPanelLeftOpen(true); setTimeout(() => searchInputRef.current?.focus(), 0); return; }
+    if (!searchOpen) { setSelRange(fullRange()); setNewName(NEW_REGION); }
+    setSearchOpen(!searchOpen);
+  };
 
   useEffect(() => {
-    if (!searchOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
-        setSearchOpen(false);
-        setSearchQuery("");
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    if (searchOpen) { setPanelLeftOpen(true); setTimeout(() => searchInputRef.current?.focus(), 0); chargerPays().catch(() => null); } // warm pays.json
   }, [searchOpen]);
 
   /* ── Zone description (scale and band actually used) ── */
@@ -1465,49 +1551,22 @@ export default function Vigil() {
     <div className="hd-root">
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <div ref={containerRef} className="hd-map" />
+      {/* Decorative MODIS / VIIRS orbits over the globe until a region is picked */}
+      <OrbitOverlay mapRef={mapRef} ready={ready} visible={!selection && !flat} enterDelayMs={MORPH_MS} />
 
       {/* Toolbar */}
       <div className="hd-toolbar">
-        <span className="hd-word">Vigil</span>
+        <img className="hd-logo" src="/vigil-logo.png" alt="Vigil" />
 
-        {/* Country search */}
-        <div className="hd-search" ref={searchRef}>
-          {!searchOpen ? (
-            <button className="hd-search-toggle" onClick={() => setSearchOpen(true)} aria-label="Search country">
-              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                <circle cx="6" cy="6" r="4.5" />
-                <line x1="9.5" y1="9.5" x2="13" y2="13" />
-              </svg>
-            </button>
-          ) : (
-            <>
-              <div className="hd-search-inner">
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-                  <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
-                </svg>
-                <input
-                  ref={searchInputRef}
-                  className="hd-search-input"
-                  placeholder="Search country…"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Escape") { setSearchOpen(false); setSearchQuery(""); } }}
-                />
-                {searchQuery && (
-                  <button className="hd-search-clear" onClick={() => setSearchQuery("")} aria-label="Clear">×</button>
-                )}
-              </div>
-              {searchMatches.length > 0 && (
-                <div className="hd-search-dropdown">
-                  {searchMatches.map((c) => (
-                    <button key={c.name} className="hd-search-result" onClick={() => selectCountry(c)}>
-                      {c.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
+        {/* Search: opens the search card in the region card's slot */}
+        <div className="hd-search">
+          <button className={"hd-search-toggle" + (searchOpen ? " on" : "")} onClick={toggleSearch}
+            aria-label="Search a country, region or coordinates" aria-expanded={searchOpen} title="Search">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <circle cx="6" cy="6" r="4.5" />
+              <line x1="9.5" y1="9.5" x2="13" y2="13" />
+            </svg>
+          </button>
         </div>
 
         <div className="hd-group">
@@ -1527,76 +1586,41 @@ export default function Vigil() {
         </div>
       )}
 
-      {/* Date + legend */}
-      <div className="hd-datechip">
-        <div className="hd-date-row">
-          {!index ? (
-            <span className="hd-mono">Loading {BASE}/index.json…</span>
-          ) : selection ? (
-            <>
-              <b className="hd-mono">
-                {modeH3 ? `${texteMois(selRange.from.y, selRange.from.m)} → ${texteMois(selRange.to.y, selRange.to.m)}` : `Map: ${moisCarte}`}
-              </b>
-              <span className="hd-mono">
-                {fmtVal(mapTotal)} {metrique === "hotspots" ? "hotspots" : "MW"} · {fmtInt(hexes.features.length)} hexagons
-              </span>
-            </>
-          ) : (
-            <>
-              <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
-              <b className="hd-mono">{texteMois(date.y, date.m)}</b>
-              <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
-              <span className="hd-mono">{moisRows === null ? "loading…" : `${fmtVal(mapTotal)} ${metrique === "hotspots" ? "hotspots" : "MW"}`}</span>
-              {bornes && (date.y !== bornes.last.y || date.m !== bornes.last.m) && <button className="hd-link" onClick={() => setDate(bornes.last)}>Latest</button>}
-            </>
-          )}
-        </div>
-        {index && (
-          <div className="hd-prov">
-            {(() => {
-              const d = selection ? (modeH3 ? selRange.to : cleMois(moisCarte ?? index.mois[0])) : date;
-              const conv = estConverti(index, d.y, d.m);
-              return `${conv ? "VIIRS converted to MODIS-Aqua equivalent" : "Observed by MODIS Aqua"}${moisCarte === partiel ? " · partial month" : ""} · ${index.methode}`;
-            })()}
+      {/* Compact map key: month, total and the 12-class colour ramp (the large banner was removed on purpose) */}
+      {index && (
+        <div className="hd-mapkey hd-glass" aria-label="Map key">
+          <div className="hd-mapkey-row">
+            {selection ? (
+              <b className="hd-mono">{modeH3 ? `${texteMois(selRange.from.y, selRange.from.m)} → ${texteMois(selRange.to.y, selRange.to.m)}` : moisCarte}</b>
+            ) : (
+              <>
+                <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
+                <b className="hd-mono">{texteMois(date.y, date.m)}</b>
+                <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
+              </>
+            )}
+            <span className="hd-mono hd-mapkey-tot">{moisRows === null && !modeH3 ? "…" : `${fmtVal(mapTotal)} ${metrique === "hotspots" ? "hotspots" : "MW"}`}{moisCarte === partiel ? " · partial month" : ""}</span>
           </div>
-        )}
-        {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
-        <div className="hd-frp-legend">
-          <span>{metrique === "hotspots" ? "Hotspots" : "FRP (MW)"} / 1,000 km² / month · H3 res {resCarte} ({TAILLE_RES[resCarte]})</span>
-          <span className="hd-ramp-lbl">{`<${fmtVal(DENS_BREAKS[metrique][resCarte][0])}`}</span>
-          <span className="hd-ramp">
-            {HEX_COLORS.map((c, i) => {
-              const b = DENS_BREAKS[metrique][resCarte];
-              return <i key={c} style={{ background: c }} title={i === 0 ? `< ${b[0]}` : i === b.length ? `≥ ${b[i - 1]}` : `${b[i - 1]} – ${b[i]}`} />;
-            })}
-          </span>
-          <span className="hd-ramp-lbl">{`≥${fmtVal(DENS_BREAKS[metrique][resCarte][DENS_BREAKS[metrique][resCarte].length - 1])}`}</span>
-          <span className="hd-ramp-note">12 equal-frequency classes (2002–2026)</span>
-        </div>
-      </div>
-
-      {/* Fire stripes: one stripe per year, top right of the globe */}
-      {selection && serie && (
-        <div className="hd-stripes-card">
-          <div className="hd-stripes" role="img" aria-label={`Fire stripes ${Y0}–${Y1} for ${selectionName}: one stripe per year, blue = fewer hotspots, red = more hotspots than the average year`}>
-            {stripes.map((c, yi) => (
-              <i
-                key={yi}
-                className={c ? "" : "empty"}
-                style={{ background: c ?? undefined }}
-                title={`${Y0 + yi}: ${annual[yi].value === null ? "no data" : `${fmtInt(annual[yi].value!)} ${unit(metrique)}${annual[yi].est ? " (estimated, partial year)" : ""}`}`}
-              />
-            ))}
+          <div className="hd-mapkey-row">
+            <span className="hd-ramp-lbl">{fmtVal(DENS_BREAKS[metrique][resCarte][0])}</span>
+            <span className="hd-ramp">
+              {HEX_COLORS.map((c, i) => {
+                const br = DENS_BREAKS[metrique][resCarte];
+                return <i key={c} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
+              })}
+            </span>
+            <span className="hd-ramp-lbl">{fmtVal(DENS_BREAKS[metrique][resCarte][DENS_BREAKS[metrique][resCarte].length - 1])}+</span>
           </div>
-          <div className="hd-stripes-axis"><span>{Y0}</span><span>{metrique === "hotspots" ? "detections" : "FRP"} / year</span><span>{Y1}</span></div>
+          <div className="hd-mapkey-note">{metrique === "hotspots" ? "Hotspots" : "FRP MW"} / 1,000 km² / month · H3 {TAILLE_RES[resCarte]} · 12 equal-frequency classes</div>
+          {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
         </div>
       )}
 
       {/* Left panel: Region card */}
-      {selection && bornes && (
-        <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
+      {(selection || searchOpen) && bornes && (
+        <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left hd-glass" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
           <div className="hd-panel-head" {...leftDrag.handle}>
-            <span className="hd-mono hd-name">{selectionName}</span>
+            <RegionName name={selection ? selectionName : newName} onRename={selection ? setSelectionName : setNewName} />
             <button className="hd-icon" onClick={() => setPanelLeftOpen(!panelLeftOpen)} aria-label={panelLeftOpen ? "Collapse region panel" : "Expand region panel"} aria-expanded={panelLeftOpen}>
               <svg width="12" height="12" viewBox="0 0 14 14"><path d={panelLeftOpen ? "M2 5l5 5 5-5" : "M2 9l5-5 5 5"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" /></svg>
             </button>
@@ -1605,8 +1629,10 @@ export default function Vigil() {
             <div className="hd-panel-body">
               <RegionCard
                 selection={selection}
-                name={selectionName}
-                onRename={setSelectionName}
+                searchRef={searchInputRef}
+                onPick={selectPlace}
+                onSearchEscape={() => { if (!selection) setSearchOpen(false); }}
+                name={selection ? selectionName : newName}
                 range={selRange}
                 onRangeChange={setSelRange}
                 onApplyBbox={handleApplyBbox}
@@ -1621,7 +1647,7 @@ export default function Vigil() {
 
       {/* Analytics panel */}
       {selection && (
-        <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
+        <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel hd-glass" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
           <div className="hd-panel-head" {...rightDrag.handle}>
             <div className="hd-head-actions">
               <button className="hd-icon" onClick={() => setSplit(true)} aria-label="Deep dive: calendar full screen" title="Deep dive">
@@ -1699,21 +1725,19 @@ export default function Vigil() {
       {/* Deep dive: full-screen calendar */}
       {split && selection && (
         <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
-          <div className="hd-split-head">
-            <span className="hd-word-sm">Vigil</span>
-            <span className="hd-mono hd-name">{selectionName}</span>
+          <div className="hd-split-head hd-glass">
             <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
               <CollapseIcon />
             </button>
           </div>
           <div className="hd-split-body">
-            <section className="hd-split-pane" aria-label="Calendar">
+            <section className="hd-split-pane hd-glass" aria-label="Calendar">
               <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span>{zoneNote && <span className="hd-zone-note inline">{zoneNote}</span>}</div>
               <div className="hd-split-cal">{renderCalendar(true)}</div>
             </section>
             {index && (
-              <section className="hd-split-pane hd-split-analytics" aria-label="Analytics">
+              <section className="hd-split-pane hd-split-analytics hd-glass" aria-label="Analytics">
                 <DeepDive index={index} serie={serie} ring={selection.ring} bbox={selection.region.bbox} y0={Y0} y1={Y1} focus={focus} stat={focusStatHot} />
               </section>
             )}
@@ -1765,7 +1789,7 @@ export default function Vigil() {
 /* ────────────────────────────────────────────────────────────────────────── */
 
 const CSS = `
-.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#0f172a;--mut:#64748b;--or:#ea580c;--cr:#dc2626;--gr:#16a34a;
+.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#000000;--mut:#000000;--or:#ea580c;--cr:#dc2626;--gr:#16a34a;
   position:fixed;inset:0;overflow:hidden;background:var(--bg2);color:var(--tx);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
   font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;color-scheme:light}
 .hd-root *{box-sizing:border-box}
@@ -1778,8 +1802,9 @@ const CSS = `
 .hd-toolbar{position:absolute;top:12px;left:12px;right:60px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;pointer-events:none;z-index:5}
 .hd-toolbar>*{pointer-events:auto;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;box-shadow:0 2px 12px rgba(15,23,42,.12)}
 .hd-word{padding:7px 12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
+.hd-logo{display:block;height:32px;width:auto;padding:0 4px;background:#fff!important}
 .hd-group{display:flex;gap:2px;padding:3px}
-.hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#334155;white-space:nowrap}
+.hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#000000;white-space:nowrap}
 .hd-btn:hover{background:var(--bg2)}
 .hd-btn.on{background:var(--tx);color:#fff}
 .hd-btn.accent{background:var(--or);color:#fff}
@@ -1802,10 +1827,9 @@ const CSS = `
 .hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
 .hd-frp-legend i{width:9px;height:9px;border-radius:50%}
 
-.hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
-  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
-.hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
-  background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-glass{background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(44px) saturate(1.4);backdrop-filter:blur(44px) saturate(1.4);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column}
+.hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden}
 .hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
 .hd-panel-left .hd-region-card{border-bottom:0}
 .hd-panel-head{cursor:grab;touch-action:none;user-select:none;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
@@ -1823,26 +1847,23 @@ const CSS = `
 .hd-search{position:relative;display:flex;flex-direction:column}
 .hd-search-toggle{border:0;background:transparent;width:30px;height:30px;display:grid;place-items:center;border-radius:6px;color:var(--tx);cursor:pointer}
 .hd-search-toggle:hover{background:rgba(15,23,42,.07)}
-.hd-search-inner{display:flex;align-items:center;gap:6px;padding:3px 6px 3px 10px}
-.hd-search-input{border:0;background:transparent;outline:none;font:inherit;font-size:12px;color:var(--tx);width:155px}
+.hd-search-toggle.on{background:rgba(15,23,42,.1)}
+.hd-search-field{display:flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--bd);border-radius:6px;padding:5px 6px 5px 9px;color:var(--mut)}
+.hd-search-field:focus-within{border-color:var(--or)}
+.hd-search-input{flex:1;min-width:0;border:0;background:transparent;outline:none;font:inherit;font-size:12px;color:var(--tx)}
 .hd-search-input::placeholder{color:var(--mut)}
 .hd-search-clear{border:0;background:transparent;padding:1px 5px;border-radius:5px;color:var(--mut);font-size:14px;line-height:1;cursor:pointer}
 .hd-search-clear:hover{color:var(--tx)}
-.hd-search-dropdown{position:absolute;top:calc(100% + 4px);left:0;min-width:100%;background:rgba(255,255,255,.96);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-radius:8px;box-shadow:0 6px 24px rgba(15,23,42,.16);overflow:hidden;z-index:20}
-.hd-search-result{display:block;width:100%;border:0;background:transparent;text-align:left;padding:7px 12px;font-size:12px;color:var(--tx);cursor:pointer;white-space:nowrap}
-.hd-search-result:hover{background:rgba(15,23,42,.06)}
+.hd-search-results{display:flex;flex-direction:column;border:1px solid var(--bd);border-radius:6px;overflow:hidden;background:var(--bg2)}
+.hd-search-result{display:flex;justify-content:space-between;gap:10px;width:100%;border:0;background:transparent;text-align:left;padding:6px 10px;font-size:12px;color:var(--tx);cursor:pointer}
+.hd-search-result.on{background:rgba(15,23,42,.07)}
+.hd-search-kind{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
 
 .hd-heat{display:grid;grid-template-columns:26px repeat(12,minmax(0,1fr));gap:1px;user-select:none}
 .hd-heat-col{font-size:9px;color:var(--mut);text-align:center;line-height:1.2}
 .hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
-.hd-stripes-card{position:absolute;top:62px;right:56px;z-index:5;width:240px;padding:6px;display:flex;flex-direction:column;gap:3px;
-  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;box-shadow:0 2px 12px rgba(15,23,42,.12)}
-.hd-stripes{display:flex;height:96px;border-radius:5px;overflow:hidden}
-.hd-stripes i{flex:1;min-width:0}
-.hd-stripes i.empty{background:repeating-linear-gradient(45deg,#e2e8f0 0 2px,#f8fafc 2px 4px)}
-.hd-stripes-axis{display:flex;justify-content:space-between;font-size:9.5px;color:var(--mut)}
 .hd-heat-legend{grid-column:1 / -1;display:flex;align-items:center;gap:6px;margin-top:4px;font-size:9.5px;color:var(--mut)}
 .hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:linear-gradient(90deg,#e8edf3,rgb(254,243,199) 4%,rgb(252,211,77) 25%,rgb(251,146,60) 50%,rgb(234,88,12) 72%,rgb(220,38,38) 88%,rgb(127,29,29))}
 .hd-cell.out{opacity:.35}
@@ -1851,9 +1872,9 @@ const CSS = `
 
 .hd-chart-wrap{position:relative}
 .hd-chart{width:100%;height:auto;display:block}
-.hd-axis{font-size:9px;fill:#64748b;font-variant-numeric:tabular-nums}
+.hd-axis{font-size:9px;fill:#000000;font-variant-numeric:tabular-nums}
 .hd-annot{font-size:9px;fill:#b91c1c;font-weight:600}
-.hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#334155;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
+.hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#000000;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
 .hd-chart-legend span{display:inline-flex;align-items:center;gap:5px}
 .hd-hover-read{margin-left:auto;color:var(--tx)}
 
@@ -1861,12 +1882,12 @@ const CSS = `
 .hd-sec-head{display:flex;justify-content:space-between;align-items:center;margin:-2px 0 -6px}
 .hd-sec-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
 
-.hd-split{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;background:var(--bg2)}
-.hd-split-head{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--bd)}
+.hd-split{position:absolute;inset:12px;z-index:20;display:flex;flex-direction:column;gap:8px;background:transparent}
+.hd-split-head{display:flex;align-items:center;gap:14px;padding:10px 16px;flex-shrink:0;align-self:flex-end;width:fit-content}
 .hd-word-sm{font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
-.hd-split-head .hd-seg{margin-left:auto}
-.hd-split-body{flex:1;min-height:0;display:flex;padding:12px}
-.hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
+.hd-split-head .hd-seg{margin-left:0}
+.hd-split-body{flex:1;min-height:0;display:flex;gap:8px;padding:0}
+.hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;border:1px solid rgba(255,255,255,.35);padding:12px 14px}
 .hd-split-pane .hd-sec-head{margin:0}
 .hd-split-cal{flex:1;min-height:0;display:flex}
 .hd-split-cal .hd-heat{flex:1}
@@ -1891,7 +1912,7 @@ const CSS = `
 
 /* ── Region Card ── */
 .hd-region-card{display:flex;flex-direction:column;gap:10px;padding:6px 14px 10px;border-bottom:1px solid var(--bd)}
-.hd-rc-titlerow{display:flex;align-items:center;gap:8px;min-height:26px}
+.hd-rc-titlerow{flex:1;min-width:0;display:flex;align-items:center;gap:8px;min-height:26px}
 .hd-rc-nameinput{flex:1;background:transparent;border:1px solid var(--or);border-radius:5px;padding:3px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--tx);outline:none;min-width:0}
 .hd-rc-rename{margin-left:auto;border:0;background:transparent;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--mut);padding:3px 7px;border-radius:5px;white-space:nowrap;flex-shrink:0}
 .hd-rc-rename:hover{background:rgba(15,23,42,.07);color:var(--tx)}
@@ -1924,16 +1945,18 @@ const CSS = `
 @media (max-width:900px){
   .hd-panel{right:8px;left:8px;width:auto;bottom:8px;max-height:50vh}
   .hd-panel-left{left:8px;right:8px;width:auto;top:auto;bottom:calc(50vh + 24px);max-height:36vh}
-  .hd-datechip{display:none}
   .hd-toolbar{right:50px}
-  .hd-stripes-card{width:150px;right:50px}
-  .hd-stripes{height:56px}
 }
 /* ── Map legend ramp ── */
 .hd-frp-legend{flex-wrap:wrap}
 .hd-ramp{display:inline-flex!important;gap:0!important}
 .hd-ramp i{width:13px!important;height:10px!important;border-radius:0!important;display:inline-block}
 .hd-ramp-note{width:100%;font-size:10px;color:var(--mut)}
+.hd-mapkey{position:absolute;left:12px;bottom:28px;z-index:5;padding:8px 11px;display:flex;flex-direction:column;gap:5px;font-size:11.5px}
+.hd-mapkey-row{display:flex;align-items:center;gap:7px}
+.hd-mapkey-row button{border:0;background:rgba(15,23,42,.07);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
+.hd-mapkey-tot{color:var(--mut)}
+.hd-mapkey-note{font-size:10px;color:var(--mut)}
 .hd-ramp-lbl{font-variant-numeric:tabular-nums}
 /* ── E7 block and PNG button ── */
 .hd-median{margin:0 14px;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.6);display:flex;flex-direction:column;gap:3px;font-size:12px}
@@ -1946,7 +1969,6 @@ const CSS = `
 .hd-fatal{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:min(560px,calc(100% - 32px));background:#fff;border:1px solid #fecaca;border-radius:10px;padding:18px 20px;box-shadow:0 8px 24px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:8px}
 .hd-fatal code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#f1f5f9;border-radius:4px;padding:1px 4px}
 .hd-fixture{padding:6px 10px;font-size:11px;font-weight:650;color:#92400e;background:rgba(254,243,199,.92)!important}
-.hd-prov{margin-top:3px;font-size:10.5px;color:var(--mut)}
 .hd-zone-note{margin:6px 14px 8px;font-size:11px;color:var(--mut);line-height:1.35}
 .hd-zone-note.warn{color:#b45309}
 .hd-zone-note.inline{margin:0 0 0 12px}
