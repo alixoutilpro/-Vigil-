@@ -7,7 +7,7 @@ import path from "path";
 export const dynamic = "force-dynamic";
 
 // On Vercel the deployment folder is read-only: only the temp dir is writable (cache then lives per instance).
-const CACHE_DIR = process.env.VERCEL ? path.join(os.tmpdir(), "weather-cache") : path.join(process.cwd(), "data", "weather-cache");
+const CACHE_DIR = process.env.VERCEL ? path.join(os.tmpdir(), "weather-cache-v2") : path.join(process.cwd(), "data", "weather-cache-v2"); // v2: day windows fixed (old caches had 1-day Januaries)
 const MAX_CELLS = 50;
 const PARAMS = "t_max_2m_24h:C,precip_24h:mm,relative_humidity_2m:p,wind_speed_10m:ms";
 
@@ -165,7 +165,9 @@ export async function GET(req: NextRequest) {
       let reqCount = 0;
 
       for (const [year, { min, max }] of Array.from(byYear).sort(([a], [b]) => a - b)) {
-        const startStr = `${year}-${String(min).padStart(2, "0")}-01T00:00:00Z`;
+        // *_24h parameters at 00:00Z describe the 24 h BEFORE the timestamp: query 00:00Z of day 2 of the first month
+        // through 00:00Z of the 1st of the month after the last one, and assign each value to the previous day.
+        const startStr = `${year}-${String(min).padStart(2, "0")}-02T00:00:00Z`;
         const endYear = max === 12 ? year + 1 : year;
         const endMon = max === 12 ? 1 : max + 1;
         const endStr = `${endYear}-${String(endMon).padStart(2, "0")}-01T00:00:00Z`;
@@ -195,8 +197,9 @@ export async function GET(req: NextRequest) {
             { tmax: number[]; precip: number[]; rh: number[]; wind: number[] }
           >();
           for (const { date, tmax, precip, rh, wind } of days) {
-            const d = new Date(date);
-            const k = mk(d.getFullYear(), d.getMonth() + 1);
+            const d = new Date(new Date(date).getTime() - 86_400_000); // window ending at this timestamp
+            if (d.getUTCFullYear() !== year || d.getUTCMonth() + 1 < min || d.getUTCMonth() + 1 > max) continue;
+            const k = mk(d.getUTCFullYear(), d.getUTCMonth() + 1);
             if (!byMonth.has(k)) byMonth.set(k, { tmax: [], precip: [], rh: [], wind: [] });
             const mo = byMonth.get(k)!;
             if (!isNaN(tmax)) mo.tmax.push(tmax);
