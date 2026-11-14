@@ -18,11 +18,11 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
 import OrbitOverlay from "./OrbitOverlay";
 import {
-  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndex, chargerMois, chargerPays, chargerTuile,
+  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndexPays, paysDeHex, chargerIndex, chargerMois, chargerPays, chargerTuile,
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
-  type CalendrierBrut, type HexMois, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
+  type CalendrierBrut, type HexMois, type IndexPays, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
 } from "./donnees";
-import { cellArea, cellToParent } from "h3-js";
+import { cellArea, cellToChildren, cellToParent } from "h3-js";
 import { serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 import DeepDive from "./DeepDive";
 
@@ -963,6 +963,10 @@ export default function Vigil() {
   const zoneReq = useRef(0);
   toolRef.current = tool;
   panelOpenRef.current = panelOpen;
+  const metriqueRef = useRef<Metrique>(metrique);
+  metriqueRef.current = metrique;
+  const indexRef = useRef<IndexV2 | null>(null);
+  indexRef.current = index;
 
   /* ── Data: index.json + incertitude.json at start ── */
   const bornes: Bornes | null = useMemo(() => index && index.mois.length
@@ -1281,20 +1285,51 @@ export default function Vigil() {
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
-      // Hexagon popup
-      map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; });
-      map.on("click", "hex", (e: MapLayerMouseEvent) => {
+      // Hexagon tooltip on hover (click also opens it: touch screens)
+      const survol = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10, className: "hd-popup", maxWidth: "300px" });
+      let ixPays: IndexPays | null = null, ixPaysCharge = false, dernierH3 = "";
+      const montrer = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const p = e.features[0].properties as { h3: string; n: number; frp: number; months: number; period: string; res: number; c: number };
+        const h = String(p.h3);
+        survol.setLngLat(e.lngLat);
+        if (h === dernierH3 && survol.isOpen()) return;
+        dernierH3 = h;
+        if (!ixPaysCharge) { ixPaysCharge = true; chargerIndexPays().then((x) => { ixPays = x; dernierH3 = ""; }).catch(() => { /* tooltip without country */ }); }
         const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
-        const [lo, la] = centreHex(String(p.h3));
-        const moy = Number(p.months) > 1 ? `<tr><td>Per month</td><td>${fmtVal(Number(p.n) / Number(p.months))}</td></tr>` : "";
-        new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
-          .setLngLat(e.lngLat)
-          .setHTML(`<table><tr><td>Hotspots</td><td>${fmtVal(Number(p.n))} <small>Aqua eq.</small></td></tr>${moy}<tr><td>FRP</td><td>${fmtInt(Number(p.frp))} MW</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>Density</td><td>${fmtVal(Number(p.c))} <small>/ 1,000 km² / month</small></td></tr><tr><td>H3 res ${esc(p.res)}</td><td>${esc(p.h3)}<br><small>${la.toFixed(3)}, ${lo.toFixed(3)}</small></td></tr></table>`)
-          .addTo(map);
-      });
+        const res = Number(p.res), n = Number(p.n), frp = Number(p.frp), months = Number(p.months), c = Number(p.c);
+        const [lo, la] = centreHex(h);
+        // country: FIRMS countries with detections in the res-5 hexagon(s) under this cell (exact, no geocoding guess)
+        let pays = "…";
+        if (ixPays) {
+          const compte = new Map<string, number>();
+          for (const k of res === 5 ? [h] : cellToChildren(h, 5)) for (const nom of paysDeHex(ixPays, k)) compte.set(nom, (compte.get(nom) ?? 0) + 1);
+          const noms = [...compte.entries()].sort((x, y) => y[1] - x[1]).map(([nom]) => nom.replace(/_/g, " "));
+          pays = noms.length ? noms.slice(0, 3).join(", ") + (noms.length > 3 ? ` +${noms.length - 3}` : "") : "—";
+        }
+        const per = String(p.period), mois = per.split(" → ");
+        const bas = indexRef.current?.bascule_viirs.slice(0, 7) ?? "2020-11";
+        const src = mois.every((s) => s < bas) ? "MODIS Aqua, observed" : mois.every((s) => s >= bas) ? "VIIRS converted to Aqua eq." : "Aqua observed, then VIIRS converted";
+        const br = DENS_BREAKS[metriqueRef.current], cls = br.filter((x) => c >= x).length;
+        const row = (k: string, v: string, title = "") => `<tr${title ? ` title="${esc(title)}"` : ""}><td>${k}</td><td>${v}</td></tr>`;
+        survol.setHTML(
+          `<div class="hd-pop-h"><b>${esc(pays)}</b><span>${fmtLat(la)} ${fmtLon(lo)}</span></div><table>` +
+          row("Period", esc(per) + (months > 1 ? ` <small>(${months} months)</small>` : "")) +
+          row("Detections", `${fmtVal(n)} <small>Aqua eq.</small>`, "Harmonized active-fire detections, MODIS-Aqua equivalent (VIGIL-K1), summed over the period") +
+          (months > 1 ? row("Per month", fmtVal(n / months)) : "") +
+          row("Σ FRP", `${fmtVal(frp)} <small>MW</small>`, "Sum of the Fire Radiative Power of the detections, MODIS-Aqua equivalent") +
+          (n > 0 ? row("FRP / detection", `${fmtVal(frp / n)} <small>MW</small>`, "Mean intensity of a detection (Σ FRP / detections)") : "") +
+          row("Density", `<i class="hd-pop-sw" style="background:${HEX_COLORS[cls]}"></i>${fmtVal(c)} <small>/1,000 km²/mo · class ${cls + 1}/12</small>`, "Colour value of the map: per 1,000 km² and per month") +
+          row("Source", src) +
+          row(`H3 res ${res}`, `${TAILLE_RES[res] ?? ""} · ${fmtInt(aireKm2(h))} km²`) +
+          `</table>`,
+        );
+        if (!survol.isOpen()) survol.addTo(map);
+      };
+      map.on("mousemove", "hex", montrer);
+      map.on("click", "hex", montrer);
+      map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "crosshair"; });
+      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; survol.remove(); dernierH3 = ""; });
 
       // Polygon tool
       map.on("click", (e) => {
@@ -2123,5 +2158,9 @@ const CSS = `
 .hd-tip-sep{height:1px;background:rgba(148,163,184,.3);margin:5px 0}
 .hd-tip-note{font-size:10.5px;color:#fbbf24;margin-top:2px}
 .hd-popup small{color:var(--mut);font-weight:400}
+.hd-pop-h{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--bd)}
+.hd-pop-h span{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+.hd-pop-sw{display:inline-block;width:9px;height:9px;margin-right:5px;border-radius:2px;vertical-align:-1px;box-shadow:inset 0 0 0 1px rgba(15,23,42,.2)}
+.hd-popup .maplibregl-popup-content{pointer-events:none}
 @media (prefers-reduced-motion:reduce){.hd-root *{transition:none!important}}
 `;

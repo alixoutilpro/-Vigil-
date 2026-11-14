@@ -176,6 +176,26 @@ export const chargerHexPays = (pays: string) => {
     return s;
   });
 };
+/** Global H3 res-5 → country index (h3_5/pays_index.*): every (hexagon, FIRMS country) pair, sorted by hexagon. */
+export interface IndexPays { noms: string[]; h3: BigUint64Array; code: Uint16Array }
+export const chargerIndexPays = () => {
+  const url = `${BASE}/h3_5/pays_index.bin.gz`;
+  return unique(url, async (): Promise<IndexPays> => {
+    const [j, v] = await Promise.all([chargerJSON<{ pays: string[] }>("h3_5/pays_index.json"), chargerBinaire(url)]);
+    const n = v.getUint32(0, true), o = v.byteOffset + 8;
+    // copies: typed arrays need aligned offsets; browsers are little-endian like the file
+    return { noms: j.pays, h3: new BigUint64Array(v.buffer.slice(o, o + 8 * n)), code: new Uint16Array(v.buffer.slice(o + 8 * n, o + 10 * n)) };
+  });
+};
+/** FIRMS countries of a res-5 hexagon (border hexagons can have two or more). */
+export function paysDeHex(ix: IndexPays, h: string): string[] {
+  const x = BigInt("0x" + h), a = ix.h3;
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < x) lo = mid + 1; else hi = mid; }
+  const out: string[] = [];
+  for (let i = lo; i < a.length && a[i] === x; i++) out.push(ix.noms[ix.code[i]]);
+  return out;
+}
 /** Countries for which brut/<pays>.json is exported (raw vs harmonized tabs). */
 export const PAYS_BRUT = new Set(["Greece"]);
 export const chargerBrut = (pays: string) => chargerJSON<CalendrierBrut>(`brut/${pays}.json`);
