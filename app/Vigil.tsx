@@ -1539,6 +1539,17 @@ export default function Vigil() {
         m.setMaxPitch(flat ? 0 : 75);
       } catch { /* older style spec */ }
     };
+    // After a morph MapLibre can keep the tile coverage computed for an intermediate projection,
+    // leaving blank rectangles: re-set the raster tile URLs so every source re-requests its tiles.
+    const refreshTiles = () => {
+      try {
+        for (const id of ["sat", "roads", "places"]) {
+          const src = SAT_STYLE.sources[id] as { tiles: string[] };
+          (m.getSource(id) as unknown as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.(src.tiles);
+        }
+        m.triggerRepaint();
+      } catch { /* source not ready */ }
+    };
     try {
       if (flat) {
         m.dragRotate.disable();
@@ -1552,7 +1563,7 @@ export default function Vigil() {
     } catch { /* older style spec */ }
 
     const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (from === flat || reduce) { settle(); return; }
+    if (from === flat || reduce) { settle(); if (from !== flat) refreshTiles(); return; }
 
     let raf = 0;
     const t0 = performance.now();
@@ -1565,8 +1576,8 @@ export default function Vigil() {
         m.setProjection({
           type: ["interpolate", ["linear"], ["zoom"], z - t, "vertical-perspective", z + 1 - t, "mercator"],
         } as never);
-      } catch { settle(); return; }
-      if (p < 1) raf = requestAnimationFrame(step); else settle();
+      } catch { settle(); refreshTiles(); return; }
+      if (p < 1) raf = requestAnimationFrame(step); else { settle(); refreshTiles(); }
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
