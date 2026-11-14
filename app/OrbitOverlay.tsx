@@ -117,10 +117,16 @@ export default function OrbitOverlay(props: {
       }
     };
 
+    let rafId = 0;
+    const applyThrottled = () => {
+      if (!visibleRef.current) return;
+      if (rafId) return;
+      rafId = requestAnimationFrame(() => { rafId = 0; apply(); });
+    };
     apply();
-    m.on("move", apply);
+    m.on("move", applyThrottled);
     m.on("resize", apply);
-    return () => { m.off("move", apply); m.off("resize", apply); };
+    return () => { m.off("move", applyThrottled); m.off("resize", apply); if (rafId) cancelAnimationFrame(rafId); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapRef, ready]);
 

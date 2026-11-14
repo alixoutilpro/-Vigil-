@@ -313,13 +313,26 @@ interface HexFeature {
 }
 type HexCollection = { type: "FeatureCollection"; features: HexFeature[] };
 
+const ZOOM_RES4 = 1.2;
+const ZOOM_RES5 = 5.0;
 /** Display resolution by zoom: the mesh stays visible at every scale (res-5 children summed into their parent: exact). */
-const resPourZoom = (z: number) => (z < 1.2 ? 3 : z < 3.6 ? 4 : 5);
+const resPourZoom = (z: number) => (z < ZOOM_RES4 ? 3 : z < ZOOM_RES5 ? 4 : 5);
 const TAILLE_RES: Record<number, string> = { 3: "~110 km", 4: "~42 km", 5: "~17 km" };
 const AIRE = new Map<string, number>();
 const aireKm2 = (h: string) => { let a = AIRE.get(h); if (a === undefined) AIRE.set(h, (a = cellArea(h, "km2"))); return a; };
 
-function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique, res = 5): HexCollection {
+/** Check if [lon, lat] is inside [west, south, east, north] expanded by `margin` fraction on each side. */
+function inViewport(lon: number, lat: number, [w, s, e, n]: [number, number, number, number], margin: number): boolean {
+  const lngSpan = w <= e ? e - w : e + 360 - w;
+  const latSpan = n - s;
+  const dlng = lngSpan * margin, dlat = latSpan * margin;
+  if (lat < Math.max(s - dlat, -90) || lat > Math.min(n + dlat, 90)) return false;
+  const w2 = w - dlng, e2 = e + dlng;
+  if (w <= e) return lon >= w2 && lon <= e2;
+  return lon >= w2 || lon <= e2; // antimeridian wrap
+}
+
+function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique, res = 5, bounds?: [number, number, number, number]): HexCollection {
   let src = rows;
   if (res < 5) {
     src = new Map();
@@ -332,6 +345,7 @@ function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: numb
   for (const [h3, a] of src) {
     const v = metrique === "hotspots" ? a.n : a.frp;
     if (v <= 0) continue;
+    if (bounds && res >= 4) { const [lo, la] = centreHex(h3); if (!inViewport(lo, la, bounds, 0.2)) continue; }
     const contour = contourHex(h3);
     features.push({
       type: "Feature",
@@ -344,14 +358,14 @@ function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: numb
 }
 
 /** One month of the world (no selection). */
-function hexDuMois(rows: HexMois[], period: string, metrique: Metrique, res = 5): HexCollection {
+function hexDuMois(rows: HexMois[], period: string, metrique: Metrique, res = 5, bounds?: [number, number, number, number]): HexCollection {
   const m = new Map<string, { n: number; frp: number }>();
   for (const r of rows) m.set(r.h3, { n: r.hotspots, frp: r.frp });
-  return hexFeatures(m, 1, period, metrique, res);
+  return hexFeatures(m, 1, period, metrique, res, bounds);
 }
 
 /** Hexagons of the zone summed over the study period (from the tiles already loaded for the calendar). */
-function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique, res = 5): HexCollection {
+function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique, res = 5, bounds?: [number, number, number, number]): HexCollection {
   const i0 = indiceMois(index, range.from.y, range.from.m), i1 = indiceMois(index, range.to.y, range.to.m);
   const m = new Map<string, { n: number; frp: number }>();
   const dans = new Set(zone.serie.hexagones);
@@ -365,7 +379,7 @@ function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique
     }
   }
   const period = i0 === i1 ? ym(monthKey(range.from.y, range.from.m)) : `${ym(monthKey(range.from.y, range.from.m))} → ${ym(monthKey(range.to.y, range.to.m))}`;
-  return hexFeatures(m, i1 - i0 + 1, period, metrique, res);
+  return hexFeatures(m, i1 - i0 + 1, period, metrique, res, bounds);
 }
 
 const r2 = (v: number | null) => (v === null ? "" : String(Math.round(v * 100) / 100));
@@ -415,8 +429,8 @@ const SAT_STYLE: StyleSpecification = {
   },
   layers: [
     { id: "sat", type: "raster", source: "sat" },
-    { id: "roads", type: "raster", source: "roads", paint: { "raster-opacity": 0.85 } },
-    { id: "places", type: "raster", source: "places" },
+    { id: "roads", type: "raster", source: "roads", minzoom: 5, paint: { "raster-opacity": 0.85 } },
+    { id: "places", type: "raster", source: "places", minzoom: 5 },
   ],
 };
 
@@ -1073,6 +1087,7 @@ export default function Vigil() {
   /** Gall-Peters warp currently applied to the map (tiles + data), see appliquerGeo. */
   const gpActifRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
+  const [mapBounds, setMapBounds] = useState<[number, number, number, number] | null>(null);
   /** Raw vs harmonized calendars (country mode, PAYS_BRUT only) and the tab shown. */
   const [brut, setBrut] = useState<CalendrierBrut | null>(null);
   const [vueCal, setVueCal] = useState<VueCal>("harmonise");
@@ -1101,6 +1116,12 @@ export default function Vigil() {
   metriqueRef.current = metrique;
   const indexRef = useRef<IndexV2 | null>(null);
   indexRef.current = index;
+  const mapMovingRef = useRef(false);
+  const sentHexRef = useRef<unknown>(null);
+  const sentPtsRef = useRef<unknown>(null);
+  const sentSelRef = useRef<unknown>(null);
+  const sentDraftRef = useRef<unknown>(null);
+  const draftRafRef = useRef<number>(0);
 
   /* ── Data: index.json + incertitude.json at start ── */
   const bornes: Bornes | null = useMemo(() => index && index.mois.length
@@ -1267,25 +1288,50 @@ export default function Vigil() {
 
   const hexes = useMemo((): HexCollection => {
     if (!index) return { type: "FeatureCollection", features: [] };
-    if (selection && zone && zone.serie.source === "h3") return hexDeZone(zone, index, deferredRange, metrique, resCarte);
-    if (!moisRows || !moisCarte) return { type: "FeatureCollection", features: [] };
-    const hp = selection?.region.pays && hexPays?.pays === selection.region.pays ? hexPays.h3 : null;
-    if (selection?.region.pays && !hp) return { type: "FeatureCollection", features: [] }; // country hexagons loading
-    const rows = !selection ? moisRows : hp ? moisRows.filter((r) => hp.has(r.h3)) : moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring));
-    return hexDuMois(rows, moisCarte, metrique, resCarte);
-  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte, hexPays]);
+    const t0 = performance.now();
+    const vb = resCarte >= 4 ? mapBounds ?? undefined : undefined;
+    let result: HexCollection;
+    if (selection && zone && zone.serie.source === "h3") {
+      result = hexDeZone(zone, index, deferredRange, metrique, resCarte, vb);
+    } else if (!moisRows || !moisCarte) {
+      result = { type: "FeatureCollection", features: [] };
+    } else {
+      const hp = selection?.region.pays && hexPays?.pays === selection.region.pays ? hexPays.h3 : null;
+      if (selection?.region.pays && !hp) return { type: "FeatureCollection", features: [] }; // country hexagons loading
+      const rows = !selection ? moisRows : hp ? moisRows.filter((r) => hp.has(r.h3)) : moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring));
+      result = hexDuMois(rows, moisCarte, metrique, resCarte, vb);
+    }
+    const dur = performance.now() - t0;
+    if (dur > 5) console.log(`[perf] hexFeatures ${dur.toFixed(1)} ms · ${result.features.length} hex · res${resCarte} · zoom${mapRef.current?.getZoom()?.toFixed(1)}`);
+    return result;
+  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte, hexPays, mapBounds]);
   const mapTotal = useMemo(() => hexes.features.reduce((a, f) => a + (metrique === "hotspots" ? f.properties.n : f.properties.frp), 0), [hexes, metrique]);
   const seuils = index?.seuils_couleur_quantiles?.[metrique === "hotspots" ? "hotspots" : "frp_MW"];
 
-  /* ── Map: push GeoJSON into sources ── */
+  /* ── Map: push GeoJSON into sources (skips sources whose data ref hasn't changed) ── */
   const pushSources = useCallback(() => {
     const m = mapRef.current;
     if (!m) return;
-    const g = (fc: unknown) => (gpActifRef.current ? gpGeoJSON(fc) : fc) as never; // Gall-Peters: warped latitudes
-    (m.getSource("hex") as GeoJSONSource | undefined)?.setData(g(hexRef.current));
-    (m.getSource("pts") as GeoJSONSource | undefined)?.setData(g(ptsRef.current));
-    (m.getSource("sel") as GeoJSONSource | undefined)?.setData(g(selFcRef.current));
-    (m.getSource("draft") as GeoJSONSource | undefined)?.setData(g(draftRef.current));
+    const g = (fc: unknown) => (gpActifRef.current ? gpGeoJSON(fc) : fc) as never;
+    if (hexRef.current !== sentHexRef.current) { sentHexRef.current = hexRef.current; (m.getSource("hex") as GeoJSONSource | undefined)?.setData(g(hexRef.current)); }
+    if (ptsRef.current !== sentPtsRef.current) { sentPtsRef.current = ptsRef.current; (m.getSource("pts") as GeoJSONSource | undefined)?.setData(g(ptsRef.current)); }
+    if (selFcRef.current !== sentSelRef.current) { sentSelRef.current = selFcRef.current; (m.getSource("sel") as GeoJSONSource | undefined)?.setData(g(selFcRef.current)); }
+    if (draftRef.current !== sentDraftRef.current) { sentDraftRef.current = draftRef.current; (m.getSource("draft") as GeoJSONSource | undefined)?.setData(g(draftRef.current)); }
+  }, []);
+
+  /* ── pushDraft: only "draft" source, rate-limited to once per animation frame ── */
+  const pushDraft = useCallback(() => {
+    if (draftRafRef.current) return;
+    draftRafRef.current = requestAnimationFrame(() => {
+      draftRafRef.current = 0;
+      const m = mapRef.current;
+      if (!m) return;
+      if (draftRef.current !== sentDraftRef.current) {
+        sentDraftRef.current = draftRef.current;
+        const g = (fc: unknown) => (gpActifRef.current ? gpGeoJSON(fc) : fc) as never;
+        (m.getSource("draft") as GeoJSONSource | undefined)?.setData(g(draftRef.current));
+      }
+    });
   }, []);
 
   const setDraft = useCallback((fc: unknown) => { draftRef.current = fc; pushSources(); }, [pushSources]);
@@ -1377,6 +1423,8 @@ export default function Vigil() {
   useEffect(() => {
     let cancelled = false;
     let map: MLMap | null = null;
+    let moveendTimer: ReturnType<typeof setTimeout> | null = null;
+    let hoverRaf = 0;
     (async () => {
       const maplibregl = (await import("maplibre-gl")).default;
       if (cancelled || !containerRef.current) return;
@@ -1385,7 +1433,7 @@ export default function Vigil() {
       map = new maplibregl.Map({
         container: containerRef.current, style: styleInitial(gp0), center: [12, gp0 ? gpVersCarte(24) : 24], zoom: 2.4,
         maxPitch: flatRef.current ? 0 : 75,
-        attributionControl: { compact: true },
+        attributionControl: { compact: true }, fadeDuration: 0,
       });
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -1431,10 +1479,24 @@ export default function Vigil() {
         colorRef.current();
       };
       map.on("style.load", install);
+      map.on("movestart", () => { mapMovingRef.current = true; });
+      map.on("moveend", () => {
+        mapMovingRef.current = false;
+        if (moveendTimer) clearTimeout(moveendTimer);
+        moveendTimer = setTimeout(() => {
+          if (!map) return;
+          const b = map.getBounds();
+          setMapBounds([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+        }, 150);
+      });
       map.on("zoomend", () => { if (map) setResCarte(resPourZoom(map.getZoom())); });
       map.on("load", () => {
         install(); pushSources(); loadedRef.current = true; setReady(true);
-        if (map) setResCarte(resPourZoom(map.getZoom()));
+        if (map) {
+          setResCarte(resPourZoom(map.getZoom()));
+          const b = map.getBounds();
+          setMapBounds([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+        }
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
@@ -1480,7 +1542,13 @@ export default function Vigil() {
         );
         if (!survol.isOpen()) survol.addTo(map);
       };
-      map.on("mousemove", "hex", montrer);
+      const montrerThrottled = (e: MapLayerMouseEvent) => {
+        if (mapMovingRef.current) return;
+        if (hoverRaf) return;
+        const eCopy = e;
+        hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; montrer(eCopy); });
+      };
+      map.on("mousemove", "hex", montrerThrottled);
       const montrerPoint = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const q = e.features[0].properties as { date: string; heure: string; sat: string; dn: string; conf: string; frp: number | null; cat: string; compte: boolean; origine: string; lat: number; lon: number };
@@ -1526,7 +1594,7 @@ export default function Vigil() {
         pts.push(reel(e.lngLat));
         setPolyN(pts.length);
         draftRef.current = draftPoly(pts);
-        pushSources();
+        pushDraft();
       });
       map.on("dblclick", (e) => {
         if (toolRef.current !== "poly") return;
@@ -1537,7 +1605,7 @@ export default function Vigil() {
       map.on("mousemove", (e) => {
         if (toolRef.current !== "poly" || !polyPts.current.length) return;
         draftRef.current = draftPoly(polyPts.current, reel(e.lngLat));
-        pushSources();
+        pushDraft();
       });
 
       // Box tool
@@ -1554,7 +1622,7 @@ export default function Vigil() {
         if (!start || !map) return;
         const p = local(ev);
         draftRef.current = draftBox(start.ll, reel(map.unproject([p.x, p.y])));
-        pushSources();
+        pushDraft();
       });
       el.addEventListener("pointerup", (ev) => {
         if (!start || !map) return;
@@ -1567,7 +1635,14 @@ export default function Vigil() {
         finalizeRef.current(b.slice(0, 4), true);
       });
     })();
-    return () => { cancelled = true; map?.remove(); mapRef.current = null; };
+    return () => {
+      cancelled = true;
+      if (moveendTimer) clearTimeout(moveendTimer);
+      if (draftRafRef.current) cancelAnimationFrame(draftRafRef.current);
+      if (hoverRaf) cancelAnimationFrame(hoverRaf);
+      map?.remove();
+      mapRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2351,7 +2426,7 @@ const CSS = PALETTE_CSS + `
 .hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
 .hd-frp-legend i{width:9px;height:9px;border-radius:50%}
 
-.hd-glass{background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(44px) saturate(1.4);backdrop-filter:blur(44px) saturate(1.4);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-glass{background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
 .hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column}
 .hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden}
 .hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
