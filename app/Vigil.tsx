@@ -804,6 +804,7 @@ function getHotspotsForExport(ring: Ring, range: DateRange): { rows: ExportRow[]
 /* ────────────────────────────────────────────────────────────────────────── */
 
 const MAX_MAP_POINTS = 40000;
+const MORPH_MS = 1100; // globe <-> plan animation
 const MAX_POINTS_PER_CELL_MONTH = 31;
 const monthKey = (y: number, m: number) => y * 12 + m;
 
@@ -1520,24 +1521,55 @@ export default function Vigil() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 2D plan / 3D globe projection toggle
+  // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
+  // MapLibre morphs globe <-> mercator through a zoom-driven expression, so each frame we slide the
+  // two stops around the current zoom to put the morph at ratio t (0 = globe, 1 = plan) without moving the view.
+  const prevFlatRef = useRef(false);
   useEffect(() => {
     flatRef.current = flat;
     const m = mapRef.current;
     if (!m || !ready) return;
+    const from = prevFlatRef.current;
+    prevFlatRef.current = flat;
+
+    const settle = () => {
+      try {
+        m.setProjection({ type: flat ? "mercator" : "globe" });
+        // A flat plan stays north-up and top-down; the globe keeps tilt and rotation.
+        m.setMaxPitch(flat ? 0 : 75);
+      } catch { /* older style spec */ }
+    };
     try {
-      m.setProjection({ type: flat ? "mercator" : "globe" });
-      // A flat plan stays north-up and top-down; the globe keeps tilt and rotation.
-      m.setMaxPitch(flat ? 0 : 75);
       if (flat) {
-        m.easeTo({ pitch: 0, bearing: 0, duration: 400 });
         m.dragRotate.disable();
         m.touchZoomRotate.disableRotation();
+        m.easeTo({ pitch: 0, bearing: 0, duration: MORPH_MS });
       } else {
+        m.setMaxPitch(75);
         m.dragRotate.enable();
         m.touchZoomRotate.enableRotation();
       }
     } catch { /* older style spec */ }
+
+    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (from === flat || reduce) { settle(); return; }
+
+    let raf = 0;
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const p = clamp((now - t0) / MORPH_MS, 0, 1);
+      const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; // easeInOutCubic
+      const t = flat ? e : 1 - e;
+      const z = m.getZoom();
+      try {
+        m.setProjection({
+          type: ["interpolate", ["linear"], ["zoom"], z - t, "vertical-perspective", z + 1 - t, "mercator"],
+        } as never);
+      } catch { settle(); return; }
+      if (p < 1) raf = requestAnimationFrame(step); else settle();
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
   }, [flat, ready]);
 
   // Tool side effects
