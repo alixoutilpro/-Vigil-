@@ -18,9 +18,9 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
 import OrbitOverlay from "./OrbitOverlay";
 import {
-  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndexPays, paysDeHex, chargerIndex, chargerMois, chargerPays, chargerTuile,
+  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndexPays, chargerPointsGrece, paysDeHex, chargerIndex, chargerMois, chargerPays, chargerTuile,
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
-  type CalendrierBrut, type HexMois, type IndexPays, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
+  type CalendrierBrut, type HexMois, type IndexPays, type PointGrece, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
 } from "./donnees";
 import { cellArea, cellToChildren, cellToParent } from "h3-js";
 import { serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
@@ -850,6 +850,13 @@ const VUES_CAL: { v: VueCal; t: string; def: string }[] = [
   { v: "harmonise", t: "Harmonized", def: "VIGIL-K1: MODIS Aqua observed until Oct 2020, then VIIRS converted to MODIS-Aqua equivalent (k per country × day/night × month)." },
 ];
 const VIIRS_BRUT = "VIIRS S-NPP (NOAA-20 on S-NPP gaps), raw";
+/** Fire-by-fire layer: every raw Greek detection of the map month (points_grece). */
+const PAYS_POINTS = "Greece";
+const LIB_CATEGORIE: Record<string, string> = {
+  retenu_vegetation: "counted (vegetation fire)", confiance_basse: "not counted: low confidence", industriel_G6: "not counted: industrial / fixed site",
+  volcan_ou_offshore: "not counted: volcano or offshore", quasi_doublon: "near-duplicate of another detection",
+};
+const LIB_SAT: Record<string, string> = { Aqua: "MODIS Aqua", Terra: "MODIS Terra", SNPP: "VIIRS S-NPP", NOAA20: "VIIRS NOAA-20", NOAA21: "VIIRS NOAA-21" };
 const NEW_REGION = "New region";
 type Tool = "none" | "box" | "poly";
 
@@ -950,6 +957,7 @@ export default function Vigil() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const hexRef = useRef<HexCollection>({ type: "FeatureCollection", features: [] });
+  const ptsRef = useRef<unknown>(EMPTY_FC);
   const selFcRef = useRef<unknown>(EMPTY_FC);
   const draftRef = useRef<unknown>(EMPTY_FC);
   const toolRef = useRef<Tool>("none");
@@ -1148,6 +1156,7 @@ export default function Vigil() {
     const m = mapRef.current;
     if (!m) return;
     (m.getSource("hex") as GeoJSONSource | undefined)?.setData(hexRef.current as never);
+    (m.getSource("pts") as GeoJSONSource | undefined)?.setData(ptsRef.current as never);
     (m.getSource("sel") as GeoJSONSource | undefined)?.setData(selFcRef.current as never);
     (m.getSource("draft") as GeoJSONSource | undefined)?.setData(draftRef.current as never);
   }, []);
@@ -1271,6 +1280,18 @@ export default function Vigil() {
             paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.25, 8, 0.8], "line-opacity": 0.55 },
           });
           map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
+          // fire by fire (Greece): MODIS = 1 km pixel (cyan, larger), VIIRS = 375 m (yellow); not counted = grey ring
+          map.addSource("pts", { type: "geojson", data: ptsRef.current as never });
+          map.addLayer({
+            id: "pts", type: "circle", source: "pts",
+            paint: {
+              "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, ["case", ["get", "modis"], 3, 2], 10, ["case", ["get", "modis"], 7, 4.5]],
+              "circle-color": ["case", ["!", ["get", "compte"]], "rgba(0,0,0,0)", ["get", "modis"], "#22d3ee", "#fde047"],
+              "circle-stroke-color": ["case", ["get", "compte"], "#0f172a", "#e2e8f0"],
+              "circle-stroke-width": ["case", ["get", "compte"], 0.8, 1.2],
+              "circle-opacity": 0.95,
+            },
+          });
           map.addLayer({ id: "draft-fill", type: "fill", source: "draft", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#0f172a", "fill-opacity": 0.08 } });
           map.addLayer({ id: "draft-line", type: "line", source: "draft", filter: ["any", ["==", ["geometry-type"], "Polygon"], ["==", ["geometry-type"], "LineString"]], paint: { "line-color": "#0f172a", "line-width": 2, "line-dasharray": [2, 2] } });
           map.addLayer({ id: "draft-pts", type: "circle", source: "draft", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 4.5, "circle-color": "#ffffff", "circle-stroke-color": "#0f172a", "circle-stroke-width": 2 } });
@@ -1290,6 +1311,7 @@ export default function Vigil() {
       let ixPays: IndexPays | null = null, ixPaysCharge = false, dernierH3 = "";
       const montrer = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
+        if (map.getLayer("pts") && map.queryRenderedFeatures(e.point, { layers: ["pts"] }).length) return; // a detection is under the cursor
         const p = e.features[0].properties as { h3: string; n: number; frp: number; months: number; period: string; res: number; c: number };
         const h = String(p.h3);
         survol.setLngLat(e.lngLat);
@@ -1327,6 +1349,33 @@ export default function Vigil() {
         if (!survol.isOpen()) survol.addTo(map);
       };
       map.on("mousemove", "hex", montrer);
+      const montrerPoint = (e: MapLayerMouseEvent) => {
+        if (toolRef.current !== "none" || !map || !e.features?.length) return;
+        const q = e.features[0].properties as { date: string; heure: string; sat: string; dn: string; conf: string; frp: number | null; cat: string; compte: boolean; origine: string; lat: number; lon: number };
+        const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+        const key = `${q.lat},${q.lon},${q.date},${q.heure},${q.sat}`;
+        survol.setLngLat(e.lngLat);
+        if (key === dernierH3 && survol.isOpen()) return;
+        dernierH3 = key;
+        const conf = /^[lnh]$/.test(String(q.conf)) ? ({ l: "low", n: "nominal", h: "high" } as Record<string, string>)[String(q.conf)] : `${q.conf} %`;
+        const row = (k: string, v: string) => `<tr><td>${k}</td><td>${v}</td></tr>`;
+        const frpTxt = q.frp === null || q.frp === undefined || Number.isNaN(Number(q.frp)) ? "n/a" : `${fmtVal(Number(q.frp))} <small>MW, raw (not harmonized)</small>`;
+        const viirs = String(q.sat).startsWith("NOAA") || q.sat === "SNPP";
+        survol.setHTML(
+          `<div class="hd-pop-h"><b>Detection · ${esc(LIB_SAT[q.sat] ?? q.sat)}</b><span>${fmtLat(Number(q.lat))} ${fmtLon(Number(q.lon))}</span></div><table>` +
+          row("Date, time", `${esc(q.date)} ${esc(String(q.heure).slice(0, 2))}:${esc(String(q.heure).slice(2))} <small>UTC · ${q.dn === "D" ? "day" : "night"} pass</small>`) +
+          row("FRP", frpTxt) +
+          row("Confidence", esc(conf)) +
+          row("Status", esc(LIB_CATEGORIE[q.cat] ?? q.cat)) +
+          row("Pixel", viirs ? "375 m (VIIRS)" : "1 km at nadir (MODIS)") +
+          row("Product", esc(q.origine === "sp_annuel" ? "FIRMS standard (archive)" : q.origine)) +
+          `</table>`,
+        );
+        if (!survol.isOpen()) survol.addTo(map);
+      };
+      map.on("mousemove", "pts", montrerPoint);
+      map.on("click", "pts", montrerPoint);
+      map.on("mouseleave", "pts", () => { if (map && toolRef.current === "none") { survol.remove(); dernierH3 = ""; } });
       map.on("click", "hex", montrer);
       map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "crosshair"; });
       map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; survol.remove(); dernierH3 = ""; });
@@ -1490,6 +1539,27 @@ export default function Vigil() {
 
   // Data → map
   useEffect(() => { hexRef.current = hexes; pushSources(); }, [hexes, ready, pushSources]);
+  const [nPoints, setNPoints] = useState<{ total: number; comptes: number } | null>(null);
+  useEffect(() => {
+    let vivant = true;
+    const vide = () => { ptsRef.current = EMPTY_FC; setNPoints(null); pushSources(); };
+    if (selection?.region.pays !== PAYS_POINTS || !moisCarte) { vide(); return; }
+    chargerPointsGrece(cleMois(moisCarte).y).then((pts: PointGrece[]) => {
+      if (!vivant) return;
+      const du = pts.filter((q) => q.date.startsWith(moisCarte));
+      ptsRef.current = {
+        type: "FeatureCollection",
+        features: du.sort((a, b) => Number(a.categorie === "retenu_vegetation") - Number(b.categorie === "retenu_vegetation")).map((q) => ({
+          type: "Feature", geometry: { type: "Point", coordinates: [q.lon, q.lat] },
+          properties: { date: q.date, heure: q.heure, sat: q.satellite, dn: q.jourNuit, conf: q.confiance, frp: q.frp, cat: q.categorie,
+            compte: q.categorie === "retenu_vegetation", modis: q.satellite === "Aqua" || q.satellite === "Terra", origine: q.origine, lat: q.lat, lon: q.lon },
+        })),
+      };
+      setNPoints({ total: du.length, comptes: du.filter((q) => q.categorie === "retenu_vegetation").length });
+      pushSources();
+    }).catch((e) => { if (vivant) { console.warn("Greek detections unavailable:", e); vide(); } });
+    return () => { vivant = false; };
+  }, [selection, moisCarte, ready, pushSources]);
   useEffect(() => { pushSources(); }, [selection, ready, pushSources]);
 
   const stepDate = (d: number) => {
@@ -1746,6 +1816,12 @@ export default function Vigil() {
             </span>
           </div>
           {selection?.region.pays && <div className="hd-mapkey-note">Map: hexagons with detections of this country (border hexagons also hold the neighbour&apos;s).</div>}
+          {nPoints && (
+            <div className="hd-mapkey-note hd-mapkey-pts">
+              <i style={{ background: "#22d3ee" }} />MODIS <i style={{ background: "#fde047" }} />VIIRS <i className="hollow" />not counted ·
+              {" "}{fmtInt(nPoints.total)} raw detections this month (all satellites, not harmonized), {fmtInt(nPoints.comptes)} counted as vegetation fires
+            </div>
+          )}
           {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
         </div>
       )}
@@ -2131,6 +2207,9 @@ const CSS = `
 .hd-mapkey-info{position:relative;display:inline-block;margin-left:6px;cursor:help;color:var(--tx);font-weight:700;outline:none}
 .hd-mapkey-pop{display:none;position:absolute;left:-8px;bottom:calc(100% + 8px);width:300px;padding:9px 11px;border-radius:10px;background:rgba(15,23,42,.94);color:#f8fafc;font-size:11px;font-weight:400;line-height:1.45;box-shadow:0 10px 30px rgba(15,23,42,.3);z-index:20}
 .hd-mapkey-info:hover .hd-mapkey-pop,.hd-mapkey-info:focus .hd-mapkey-pop,.hd-mapkey-info:focus-within .hd-mapkey-pop{display:block}
+.hd-mapkey-pts{max-width:300px;line-height:1.5}
+.hd-mapkey-pts i{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 4px;vertical-align:0;box-shadow:0 0 0 1px #0f172a}
+.hd-mapkey-pts i.hollow{background:transparent;box-shadow:0 0 0 1.2px #94a3b8}
 .hd-calview{display:flex;flex-direction:column;gap:5px;margin:2px 0 4px}
 .hd-calview-tabs{display:flex;gap:3px;padding:3px;border-radius:9px;background:rgba(15,23,42,.06)}
 .hd-calview-tabs button{flex:1;border:0;background:transparent;padding:5px 4px;border-radius:7px;font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;white-space:nowrap}

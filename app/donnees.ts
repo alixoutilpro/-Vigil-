@@ -196,6 +196,30 @@ export function paysDeHex(ix: IndexPays, h: string): string[] {
   for (let i = lo; i < a.length && a[i] === x; i++) out.push(ix.noms[ix.code[i]]);
   return out;
 }
+/** One Greek detection (points_grece/YYYY.csv.gz, contract v2 §2): raw satellite detection, with why it is (not) counted. */
+export interface PointGrece {
+  lat: number; lon: number; date: string; heure: string; satellite: string; jourNuit: string;
+  confiance: string; frp: number | null; categorie: string; compte: boolean; origine: string;
+}
+/** Every Greek detection of one year (a few hundred kB, gzip). */
+export const chargerPointsGrece = (annee: number) => {
+  const url = `${BASE}/points_grece/${annee}.csv.gz`;
+  return unique(url, async (): Promise<PointGrece[]> => {
+    const v = await chargerBinaire(url);
+    const lignes = new TextDecoder().decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).split(/\r?\n/);
+    const tete = lignes[0].split(","), col = (n: string) => tete.indexOf(n);
+    const [la, lo, d, h, s, dn, cf, fr, ca, cc, og] = ["latitude", "longitude", "acq_date", "acq_time", "satellite", "daynight", "confidence", "frp", "categorie", "compte_calendrier", "origine"].map(col);
+    const out: PointGrece[] = [];
+    for (let i = 1; i < lignes.length; i++) {
+      const x = lignes[i].split(",");
+      if (x.length < tete.length) continue;
+      const f = parseFloat(x[fr]);
+      out.push({ lat: +x[la], lon: +x[lo], date: x[d], heure: x[h].padStart(4, "0"), satellite: x[s], jourNuit: x[dn], confiance: x[cf],
+        frp: Number.isFinite(f) ? f : null, categorie: x[ca], compte: x[cc] === "True", origine: x[og] });
+    }
+    return out;
+  });
+};
 /** Countries for which brut/<pays>.json is exported (raw vs harmonized tabs). */
 export const PAYS_BRUT = new Set(["Greece"]);
 export const chargerBrut = (pays: string) => chargerJSON<CalendrierBrut>(`brut/${pays}.json`);
