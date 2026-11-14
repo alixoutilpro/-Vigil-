@@ -22,6 +22,7 @@ import {
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
   type HexMois, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type Tuile,
 } from "./donnees";
+import { cellArea, cellToParent } from "h3-js";
 import { serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 import DeepDive from "./DeepDive";
 
@@ -257,7 +258,7 @@ function fmtCompact(n: number): string {
   return String(Math.round(n));
 }
 /** Value with one decimal under 10 (converted totals are not integers). */
-const fmtVal = (n: number) => (Math.abs(n) < 10 && n % 1 ? n.toFixed(1) : fmtInt(n));
+const fmtVal = (n: number) => (n !== 0 && Math.abs(n) < 1 ? String(Number(n.toPrecision(2))) : Math.abs(n) < 10 && n % 1 ? n.toFixed(1) : fmtInt(n));
 const unit = (m: Metrique) => (m === "hotspots" ? "detections" : "MW");
 const LIB_FIAB: Record<string, string> = { elevee: "high", moyenne: "medium", faible: "low" };
 
@@ -306,34 +307,50 @@ const ym = (k: number) => texteMois(Math.floor(k / 12), k % 12);
 interface HexFeature {
   type: "Feature";
   geometry: { type: "Polygon"; coordinates: Ring[] };
-  /** c = colour value (monthly mean over the period), n = hotspots over the period. */
-  properties: { h3: string; n: number; frp: number; c: number; months: number; period: string };
+  /** c = colour value: monthly density per 1,000 km² (hotspots or MW), n = hotspots over the period. */
+  properties: { h3: string; n: number; frp: number; c: number; months: number; period: string; res: number };
 }
 type HexCollection = { type: "FeatureCollection"; features: HexFeature[] };
 
-function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique): HexCollection {
+/** Display resolution by zoom: the mesh stays visible at every scale (res-5 children summed into their parent: exact). */
+const resPourZoom = (z: number) => (z < 1.2 ? 3 : z < 3.6 ? 4 : 5);
+const TAILLE_RES: Record<number, string> = { 3: "~110 km", 4: "~42 km", 5: "~17 km" };
+const AIRE = new Map<string, number>();
+const aireKm2 = (h: string) => { let a = AIRE.get(h); if (a === undefined) AIRE.set(h, (a = cellArea(h, "km2"))); return a; };
+
+function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique, res = 5): HexCollection {
+  let src = rows;
+  if (res < 5) {
+    src = new Map();
+    for (const [h, a] of rows) {
+      const p = cellToParent(h, res), b = src.get(p);
+      if (b) { b.n += a.n; b.frp += a.frp; } else src.set(p, { n: a.n, frp: a.frp });
+    }
+  }
   const features: HexFeature[] = [];
-  for (const [h3, a] of rows) {
+  for (const [h3, a] of src) {
     const v = metrique === "hotspots" ? a.n : a.frp;
     if (v <= 0) continue;
+    const contour = contourHex(h3);
     features.push({
       type: "Feature",
-      geometry: { type: "Polygon", coordinates: [[...contourHex(h3), contourHex(h3)[0]]] },
-      properties: { h3, n: Math.round(a.n * 100) / 100, frp: Math.round(a.frp * 10) / 10, c: v / Math.max(1, months), months, period },
+      geometry: { type: "Polygon", coordinates: [[...contour, contour[0]]] },
+      // colour = density (per 1,000 km² and per month): comparable between zooms, hexagon sizes and periods
+      properties: { h3, n: Math.round(a.n * 100) / 100, frp: Math.round(a.frp * 10) / 10, c: ((v / Math.max(1, months)) / aireKm2(h3)) * 1000, months, period, res },
     });
   }
   return { type: "FeatureCollection", features };
 }
 
 /** One month of the world (no selection). */
-function hexDuMois(rows: HexMois[], period: string, metrique: Metrique): HexCollection {
+function hexDuMois(rows: HexMois[], period: string, metrique: Metrique, res = 5): HexCollection {
   const m = new Map<string, { n: number; frp: number }>();
   for (const r of rows) m.set(r.h3, { n: r.hotspots, frp: r.frp });
-  return hexFeatures(m, 1, period, metrique);
+  return hexFeatures(m, 1, period, metrique, res);
 }
 
 /** Hexagons of the zone summed over the study period (from the tiles already loaded for the calendar). */
-function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique): HexCollection {
+function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique, res = 5): HexCollection {
   const i0 = indiceMois(index, range.from.y, range.from.m), i1 = indiceMois(index, range.to.y, range.to.m);
   const m = new Map<string, { n: number; frp: number }>();
   const dans = new Set(zone.serie.hexagones);
@@ -347,7 +364,7 @@ function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique
     }
   }
   const period = i0 === i1 ? ym(monthKey(range.from.y, range.from.m)) : `${ym(monthKey(range.from.y, range.from.m))} → ${ym(monthKey(range.to.y, range.to.m))}`;
-  return hexFeatures(m, i1 - i0 + 1, period, metrique);
+  return hexFeatures(m, i1 - i0 + 1, period, metrique, res);
 }
 
 const r2 = (v: number | null) => (v === null ? "" : String(Math.round(v * 100) / 100));
@@ -418,14 +435,35 @@ function heatMaxOf(mois: (MoisZone | null)[], metrique: Metrique): number {
 }
 const heatT = (x: number, max: number) => (x <= 0 ? 0 : Math.log1p(x) / Math.log1p(Math.max(max, 1)));
 
-/** Map fill colour: steps at the quantiles of non-zero hexagon-months of index.json (log-spaced by nature). */
-const HEX_COLORS = ["#fed976", "#feb24c", "#fd8d3c", "#f03b20", "#bd0026", "#800026"];
-function hexColorExpr(seuils: Record<string, number> | undefined): unknown {
-  const q = ["0.5", "0.75", "0.9", "0.95", "0.99"].map((k) => seuils?.[k]).filter((v): v is number => typeof v === "number");
+/**
+ * Map fill colour: density per 1,000 km² per month in 12 EQUAL-FREQUENCY classes (each colour = 1/12 of the active
+ * hexagon-months of 2002-07 → 2026-10), one set of breaks per displayed H3 resolution. Breaks are fixed in time,
+ * so months, seasons and years stay comparable, and dense where the data are, so neighbouring territories separate.
+ * Computed on 13.5 M res-5 hexagon-months (and their res-4 / res-3 parents), partial month excluded.
+ * 12 shades from very light yellow to very dark red: sequential, monotone lightness, colour-blind safe.
+ */
+const HEX_COLORS = ["#ffffd4", "#fff3a8", "#ffe680", "#ffd45c", "#ffbd45", "#fea03a", "#fd8132", "#f5602a", "#e44022", "#c9261b", "#a11416", "#6e0a10"];
+const DENS_BREAKS: Record<Metrique, Record<number, number[]>> = {
+  hotspots: {
+    3: [0.0323, 0.0751, 0.0988, 0.162, 0.244, 0.374, 0.581, 0.953, 1.7, 3.5, 9.84],
+    4: [0.124, 0.364, 0.528, 0.629, 1.02, 1.43, 2.07, 3.19, 5.3, 9.97, 23.8],
+    5: [0.724, 1.57, 3.35, 3.79, 4.45, 6.93, 9.06, 13.2, 19.4, 31.2, 59.5],
+  },
+  frp: {
+    3: [0.408, 0.865, 1.58, 2.75, 4.73, 8.13, 14.4, 26.8, 54.6, 129, 414],
+    4: [1.73, 4.07, 6.77, 11, 17.7, 29.1, 49.3, 87.3, 166, 356, 975],
+    5: [9.65, 23.5, 38.2, 58.3, 88.8, 136, 214, 347, 590, 1100, 2480],
+  },
+};
+function hexColorExpr(metrique: Metrique, res: number): unknown {
   const stops: unknown[] = [];
-  let last = -Infinity;
-  q.forEach((v, i) => { if (v > last) { stops.push(v, HEX_COLORS[i + 1]); last = v; } });
-  return stops.length ? ["step", ["get", "c"], HEX_COLORS[0], ...stops] : HEX_COLORS[2];
+  DENS_BREAKS[metrique][res].forEach((v, i) => stops.push(v, HEX_COLORS[i + 1]));
+  return ["step", ["get", "c"], HEX_COLORS[0], ...stops];
+}
+/** Lowest class fades (sparse detections), every other class is drawn opaque enough to read the gradient. */
+function hexOpacityExpr(metrique: Metrique, res: number): unknown {
+  const b0 = DENS_BREAKS[metrique][res][0];
+  return ["interpolate", ["linear"], ["zoom"], 2, ["case", ["<", ["get", "c"], b0], 0.4, 0.9], 9, ["case", ["<", ["get", "c"], b0], 0.35, 0.75]];
 }
 
 interface AnnualPt {
@@ -899,6 +937,7 @@ export default function Vigil() {
   const [newName, setNewName] = useState(NEW_REGION);
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
+  const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -934,7 +973,9 @@ export default function Vigil() {
         setIndex(ix);
         setInc(ic);
         const last = cleMois(ix.mois[ix.mois.length - 1]);
-        setDate(last);
+        const partielIx = moisPartiel(ix);
+        const dernierComplet = partielIx === ix.mois[ix.mois.length - 1] && ix.mois.length > 1 ? cleMois(ix.mois[ix.mois.length - 2]) : last;
+        setDate(dernierComplet);
         setSelRange({ from: cleMois(ix.mois[0]), to: last });
       } catch (e) {
         if (vivant) setErreur(e instanceof ErreurDonnees ? `${e.url} (${e.statut})` : String((e as Error).message || e));
@@ -1011,11 +1052,12 @@ export default function Vigil() {
 
   const hexes = useMemo((): HexCollection => {
     if (!index) return { type: "FeatureCollection", features: [] };
-    if (selection && zone && zone.serie.source === "h3") return hexDeZone(zone, index, deferredRange, metrique);
+    if (selection && zone && zone.serie.source === "h3") return hexDeZone(zone, index, deferredRange, metrique, resCarte);
     if (!moisRows || !moisCarte) return { type: "FeatureCollection", features: [] };
     const rows = selection ? moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring)) : moisRows;
-    return hexDuMois(rows, moisCarte, metrique);
-  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte]);
+    return hexDuMois(rows, moisCarte, metrique, resCarte);
+  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte]);
+  const mapTotal = useMemo(() => hexes.features.reduce((a, f) => a + (metrique === "hotspots" ? f.properties.n : f.properties.frp), 0), [hexes, metrique]);
   const seuils = index?.seuils_couleur_quantiles?.[metrique === "hotspots" ? "hotspots" : "frp_MW"];
 
   /* ── Map: push GeoJSON into sources ── */
@@ -1139,11 +1181,11 @@ export default function Vigil() {
           map.addLayer({ id: "sel-fill", type: "fill", source: "sel", paint: { "fill-color": "#dc2626", "fill-opacity": 0.07 } });
           map.addLayer({
             id: "hex", type: "fill", source: "hex",
-            paint: { "fill-color": HEX_COLORS[2], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 2, 0.85, 9, 0.6] },
+            paint: { "fill-color": HEX_COLORS[4], "fill-opacity": ["interpolate", ["linear"], ["zoom"], 2, ["case", ["<", ["get", "c"], 0.3], 0.35, 0.88], 9, ["case", ["<", ["get", "c"], 0.3], 0.3, 0.7]] }, // near-empty hexagons fade
           });
-          map.addLayer({
-            id: "hex-line", type: "line", source: "hex", minzoom: 5,
-            paint: { "line-color": "#ffffff", "line-width": 0.4, "line-opacity": 0.6 },
+          map.addLayer({ // the mesh: hexagon outlines at every zoom
+            id: "hex-line", type: "line", source: "hex",
+            paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.25, 8, 0.8], "line-opacity": 0.55 },
           });
           map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
           map.addLayer({ id: "draft-fill", type: "fill", source: "draft", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#0f172a", "fill-opacity": 0.08 } });
@@ -1153,8 +1195,10 @@ export default function Vigil() {
         colorRef.current();
       };
       map.on("style.load", install);
+      map.on("zoomend", () => { if (map) setResCarte(resPourZoom(map.getZoom())); });
       map.on("load", () => {
         install(); pushSources(); loadedRef.current = true; setReady(true);
+        if (map) setResCarte(resPourZoom(map.getZoom()));
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
@@ -1163,13 +1207,13 @@ export default function Vigil() {
       map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; });
       map.on("click", "hex", (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
-        const p = e.features[0].properties as { h3: string; n: number; frp: number; months: number; period: string };
+        const p = e.features[0].properties as { h3: string; n: number; frp: number; months: number; period: string; res: number; c: number };
         const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
         const [lo, la] = centreHex(String(p.h3));
         const moy = Number(p.months) > 1 ? `<tr><td>Per month</td><td>${fmtVal(Number(p.n) / Number(p.months))}</td></tr>` : "";
         new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
           .setLngLat(e.lngLat)
-          .setHTML(`<table><tr><td>Hotspots</td><td>${fmtVal(Number(p.n))} <small>Aqua eq.</small></td></tr>${moy}<tr><td>FRP</td><td>${fmtInt(Number(p.frp))} MW</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>H3 res 5</td><td>${esc(p.h3)}<br><small>${la.toFixed(3)}, ${lo.toFixed(3)}</small></td></tr></table>`)
+          .setHTML(`<table><tr><td>Hotspots</td><td>${fmtVal(Number(p.n))} <small>Aqua eq.</small></td></tr>${moy}<tr><td>FRP</td><td>${fmtInt(Number(p.frp))} MW</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>Density</td><td>${fmtVal(Number(p.c))} <small>/ 1,000 km² / month</small></td></tr><tr><td>H3 res ${esc(p.res)}</td><td>${esc(p.h3)}<br><small>${la.toFixed(3)}, ${lo.toFixed(3)}</small></td></tr></table>`)
           .addTo(map);
       });
 
@@ -1236,9 +1280,10 @@ export default function Vigil() {
   colorRef.current = () => {
     const m = mapRef.current;
     if (!m?.getLayer("hex")) return;
-    m.setPaintProperty("hex", "fill-color", hexColorExpr(seuils) as never);
+    m.setPaintProperty("hex", "fill-color", hexColorExpr(metrique, resCarte) as never);
+    m.setPaintProperty("hex", "fill-opacity", hexOpacityExpr(metrique, resCarte) as never);
   };
-  useEffect(() => { colorRef.current(); }, [seuils, ready]);
+  useEffect(() => { colorRef.current(); }, [metrique, resCarte, ready]);
 
 
   // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
@@ -1332,6 +1377,13 @@ export default function Vigil() {
   // Data → map
   useEffect(() => { hexRef.current = hexes; pushSources(); }, [hexes, ready, pushSources]);
   useEffect(() => { pushSources(); }, [selection, ready, pushSources]);
+
+  const stepDate = (d: number) => {
+    if (!bornes) return;
+    let i = date.y * 12 + date.m + d;
+    i = clamp(i, monthKey(bornes.first.y, bornes.first.m), monthKey(bornes.last.y, bornes.last.m));
+    setDate({ y: Math.floor(i / 12), m: i % 12 });
+  };
 
   /* ── Trend chart geometry ── */
   const W = 340, H = 112, ml = 30, mr = 4, mt = 6, mb = 16;
@@ -1531,6 +1583,36 @@ export default function Vigil() {
         <div className="hd-hintbar">
           {tool === "box" ? "Drag on the map" : polyN < 3 ? `Click to add vertices (${polyN})` : "Click first vertex, double-click, or Enter to close"}
           <span>Esc to cancel</span>
+        </div>
+      )}
+
+      {/* Compact map key: month, total and the 12-class colour ramp (the large banner was removed on purpose) */}
+      {index && (
+        <div className="hd-mapkey hd-glass" aria-label="Map key">
+          <div className="hd-mapkey-row">
+            {selection ? (
+              <b className="hd-mono">{modeH3 ? `${texteMois(selRange.from.y, selRange.from.m)} → ${texteMois(selRange.to.y, selRange.to.m)}` : moisCarte}</b>
+            ) : (
+              <>
+                <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
+                <b className="hd-mono">{texteMois(date.y, date.m)}</b>
+                <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
+              </>
+            )}
+            <span className="hd-mono hd-mapkey-tot">{moisRows === null && !modeH3 ? "…" : `${fmtVal(mapTotal)} ${metrique === "hotspots" ? "hotspots" : "MW"}`}{moisCarte === partiel ? " · partial month" : ""}</span>
+          </div>
+          <div className="hd-mapkey-row">
+            <span className="hd-ramp-lbl">{fmtVal(DENS_BREAKS[metrique][resCarte][0])}</span>
+            <span className="hd-ramp">
+              {HEX_COLORS.map((c, i) => {
+                const br = DENS_BREAKS[metrique][resCarte];
+                return <i key={c} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
+              })}
+            </span>
+            <span className="hd-ramp-lbl">{fmtVal(DENS_BREAKS[metrique][resCarte][DENS_BREAKS[metrique][resCarte].length - 1])}+</span>
+          </div>
+          <div className="hd-mapkey-note">{metrique === "hotspots" ? "Hotspots" : "FRP MW"} / 1,000 km² / month · H3 {TAILLE_RES[resCarte]} · 12 equal-frequency classes</div>
+          {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
         </div>
       )}
 
@@ -1865,6 +1947,17 @@ const CSS = `
   .hd-panel-left{left:8px;right:8px;width:auto;top:auto;bottom:calc(50vh + 24px);max-height:36vh}
   .hd-toolbar{right:50px}
 }
+/* ── Map legend ramp ── */
+.hd-frp-legend{flex-wrap:wrap}
+.hd-ramp{display:inline-flex!important;gap:0!important}
+.hd-ramp i{width:13px!important;height:10px!important;border-radius:0!important;display:inline-block}
+.hd-ramp-note{width:100%;font-size:10px;color:var(--mut)}
+.hd-mapkey{position:absolute;left:12px;bottom:28px;z-index:5;padding:8px 11px;display:flex;flex-direction:column;gap:5px;font-size:11.5px}
+.hd-mapkey-row{display:flex;align-items:center;gap:7px}
+.hd-mapkey-row button{border:0;background:rgba(15,23,42,.07);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
+.hd-mapkey-tot{color:var(--mut)}
+.hd-mapkey-note{font-size:10px;color:var(--mut)}
+.hd-ramp-lbl{font-variant-numeric:tabular-nums}
 /* ── E7 block and PNG button ── */
 .hd-median{margin:0 14px;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.6);display:flex;flex-direction:column;gap:3px;font-size:12px}
 .hd-median-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
