@@ -1297,8 +1297,9 @@ export default function Vigil() {
       const install = () => {
         if (!map) return;
         try {
-          const want = flatRef.current ? "mercator" : "globe";
-          if (map.getProjection()?.type !== want) map.setProjection({ type: want });
+          // Re-applied on every style load: plain "mercator" or the globe curve (see the 2D/3D toggle).
+          if (flatRef.current) map.setProjection({ type: "mercator" });
+          else if (!Array.isArray(map.getProjection()?.type)) map.setProjection({ type: ["interpolate", ["linear"], ["zoom"], 11, "vertical-perspective", 12, "mercator"] } as never);
         } catch { /* older style spec */ }
         if (!map.getSource("hex")) {
           map.addSource("hex", { type: "geojson", data: hexRef.current as never });
@@ -1491,6 +1492,7 @@ export default function Vigil() {
   // MapLibre morphs globe <-> mercator through a zoom-driven expression, so each frame we slide the
   // two stops around the current zoom to put the morph at ratio t (0 = globe, 1 = plan) without moving the view.
   const prevFlatRef = useRef(false);
+  const morphTRef = useRef(0); // current morph ratio (0 = globe, 1 = plan), so an interrupted morph resumes smoothly
   useEffect(() => {
     flatRef.current = flat;
     const m = mapRef.current;
@@ -1498,9 +1500,37 @@ export default function Vigil() {
     const from = prevFlatRef.current;
     prevFlatRef.current = flat;
 
+    // Same curve as MapLibre's built-in "globe", but as an expression: style.setProjection() ignores
+    // { type: "globe" } while a GlobeProjection is active (same name), so after a morph it would keep the
+    // last intermediate expression and the globe would no longer be a sphere once the zoom changes.
+    const GLOBE_EXPR = ["interpolate", ["linear"], ["zoom"], 11, "vertical-perspective", 12, "mercator"];
+    type Internal = {
+      style?: { stylesheet?: { projection?: unknown }; projection?: {
+        name?: string; setProjection?: (p: unknown) => void;
+        _transitionable?: { untransitioned: () => unknown }; _transitioning?: unknown;
+      } };
+      _update?: (updateStyle: boolean) => void;
+    };
+    // Set a globe-family projection expression. Map.setProjection() rebuilds the projection, the transform
+    // and reloads every tile on each call: fine once, but 60 times a second it makes the morph stutter and
+    // leaves blank tiles. When a GlobeProjection is already active, update its expression in place instead.
+    const setGlobeExpr = (type: unknown, name: string) => {
+      const im = m as unknown as Internal;
+      const proj = im.style?.projection;
+      if (proj?.name === "globe" && proj.setProjection && proj._transitionable && im._update && im.style?.stylesheet) {
+        proj.setProjection({ type });
+        proj._transitioning = proj._transitionable.untransitioned();
+        im.style.stylesheet.projection = { type: name };
+        im._update(true); // style.update() -> projection.recalculate() at the current zoom
+      } else {
+        m.setProjection({ type } as never);
+      }
+    };
     const settle = () => {
       try {
-        m.setProjection({ type: flat ? "mercator" : "globe" });
+        if (flat) m.setProjection({ type: "mercator" });
+        else setGlobeExpr(GLOBE_EXPR, "globe");
+        morphTRef.current = flat ? 1 : 0;
         // A flat plan stays north-up and top-down; the globe keeps tilt and rotation.
         m.setMaxPitch(flat ? 0 : 75);
       } catch { /* older style spec */ }
@@ -1532,18 +1562,20 @@ export default function Vigil() {
     if (from === flat || reduce) { settle(); if (from !== flat) refreshTiles(); return; }
 
     let raf = 0;
+    const tStart = morphTRef.current, tEnd = flat ? 1 : 0;
+    const dur = Math.max(1, MORPH_MS * Math.abs(tEnd - tStart));
     const t0 = performance.now();
     const step = (now: number) => {
-      const p = clamp((now - t0) / MORPH_MS, 0, 1);
+      const p = clamp((now - t0) / dur, 0, 1);
       const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; // easeInOutCubic
-      const t = flat ? e : 1 - e;
+      const t = tStart + (tEnd - tStart) * e;
+      morphTRef.current = t;
+      if (p >= 1) { settle(); refreshTiles(); return; }
       const z = m.getZoom();
       try {
-        m.setProjection({
-          type: ["interpolate", ["linear"], ["zoom"], z - t, "vertical-perspective", z + 1 - t, "mercator"],
-        } as never);
+        setGlobeExpr(["interpolate", ["linear"], ["zoom"], z - t, "vertical-perspective", z + 1 - t, "mercator"], "globe");
       } catch { settle(); refreshTiles(); return; }
-      if (p < 1) raf = requestAnimationFrame(step); else { settle(); refreshTiles(); }
+      raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
