@@ -2635,10 +2635,10 @@ const CSS = PALETTE_CSS + `
 .hd-heat.lg .hd-cell{height:auto;min-height:6px;border-radius:2px}
 .hd-heat.lg .hd-heat-col,.hd-heat.lg .hd-heat-row{font-size:11px}
 
-.hd-tip{position:fixed;z-index:50;width:230px;background:rgba(15,23,42,.94);color:#f8fafc;border-radius:8px;padding:9px 11px;box-shadow:0 8px 24px rgba(15,23,42,.16);pointer-events:none;font-size:12px}
+.hd-tip{position:fixed;z-index:50;width:230px;background:#fff;color:var(--tx);border:1px solid var(--bd);border-radius:10px;padding:9px 11px;box-shadow:0 8px 24px rgba(15,23,42,.18);pointer-events:none;font-size:12px}
 .hd-tip-title{font-weight:700;margin-bottom:4px;font-family:ui-monospace,Menlo,monospace}
 .hd-tip-r{display:flex;justify-content:space-between;gap:10px;padding:1px 0}
-.hd-tip-r span{color:#94a3b8}
+.hd-tip-r span{color:var(--mut)}
 .hd-tip-r b{font-weight:650;font-variant-numeric:tabular-nums;text-align:right}
 .hd-tip-r.dim{font-size:11px}
 
@@ -2734,8 +2734,8 @@ const CSS = PALETTE_CSS + `
 .hd-cell.partial{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)!important}
 .hd-heat-partial{display:inline-flex;align-items:center;gap:4px;margin-left:auto}
 .hd-heat-partial b{width:10px;height:6px;border-radius:1px;background:var(--heat-mid) repeating-linear-gradient(45deg,rgba(255,255,255,.75) 0 1.5px,transparent 1.5px 4px)}
-.hd-tip-sep{height:1px;background:rgba(148,163,184,.3);margin:5px 0}
-.hd-tip-note{font-size:10.5px;color:#fbbf24;margin-top:2px}
+.hd-tip-sep{height:1px;background:var(--bd);margin:5px 0}
+.hd-tip-note{font-size:10.5px;color:#b45309;margin-top:2px}
 .hd-popup small{color:var(--mut);font-weight:400}
 .hd-pop-h{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--bd)}
 .hd-pop-h span{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
