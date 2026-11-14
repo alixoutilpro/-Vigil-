@@ -16,3 +16,4 @@ data/processed/
 .env
 *.parquet
 data/raw/**/*.csv
+data/weather-cache/
