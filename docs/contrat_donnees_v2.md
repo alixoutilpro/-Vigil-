@@ -69,6 +69,8 @@ Colonnes : `latitude, longitude, acq_date, acq_time, satellite, instrument, dayn
 compte_calendrier, origine, version`. `categorie` = raison quand le point n'est pas compté
 (`confiance_basse`, `industriel_G6`, `volcan_ou_offshore`, `quasi_doublon`, …) ; `compte_calendrier = True` = compté.
 Export CSV d'une recherche = filtrer zone + dates, garder toutes les colonnes (transparence).
+Branché dans l'interface (bouton « Export detections (CSV) », Grèce ou zone qui touche la Grèce) : lignes FIRMS intactes,
+filtre mois de la période d'étude + point dans la zone (mode zone), en-tête `#` expliquant brut / harmonisé et `categorie`.
 
 ### `brut/<Pays>.json` — calendriers brut / harmonisé (Grèce)
 Produit par `python -m pipeline.v2.export_calendrier_brut --pays Greece`. Tableaux mensuels alignés sur `premier_mois`

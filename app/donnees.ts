@@ -220,6 +220,12 @@ export const chargerPointsGrece = (annee: number) => {
     return out;
   });
 };
+/** Raw lines of points_grece/YYYY.csv.gz (E9 export keeps every FIRMS column untouched). Missing year → no line. */
+export async function chargerLignesGrece(annee: number): Promise<{ tete: string; lignes: string[] }> {
+  const v = await chargerBinaire(`${BASE}/points_grece/${annee}.csv.gz`);
+  const l = new TextDecoder().decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).split(/\r?\n/).filter((x) => x.length);
+  return { tete: l[0] ?? "", lignes: l.slice(1) };
+}
 /** Countries for which brut/<pays>.json is exported (raw vs harmonized tabs). */
 export const PAYS_BRUT = new Set(["Greece"]);
 export const chargerBrut = (pays: string) => chargerJSON<CalendrierBrut>(`brut/${pays}.json`);

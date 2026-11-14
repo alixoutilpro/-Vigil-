@@ -18,7 +18,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
 import OrbitOverlay from "./OrbitOverlay";
 import {
-  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndexPays, chargerPointsGrece, paysDeHex, chargerIndex, chargerMois, chargerPays, chargerTuile,
+  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndexPays, chargerLignesGrece, chargerPointsGrece, paysDeHex, pip, chargerIndex, chargerMois, chargerPays, chargerTuile,
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
   type CalendrierBrut, type HexMois, type IndexPays, type PointGrece, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
 } from "./donnees";
@@ -578,6 +578,8 @@ interface RegionCardProps {
   bornes: Bornes;
   /** CSV of the zone for the current study period, null when there is nothing to export. */
   onExport: () => string | null;
+  /** E9: every detection of the zone and period (Greece only), null when the zone has no point file. */
+  onExportPoints: (() => Promise<{ csv: string; n: number } | null>) | null;
   /** False while the zone is loading. */
   ready: boolean;
 }
@@ -632,7 +634,7 @@ function RegionName({ name, onRename }: { name: string; onRename: (name: string)
   );
 }
 
-function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, ready }: RegionCardProps) {
+function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, onExportPoints, ready }: RegionCardProps) {
   const bboxSel = selection?.region.bbox ?? null;
   const wasPolygon = !!selection?.wasPolygon;
 
@@ -699,6 +701,31 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
 
   /* ── Export ── */
   const [exportErr, setExportErr] = useState("");
+
+  const [ptsMsg, setPtsMsg] = useState("");
+  const [ptsBusy, setPtsBusy] = useState(false);
+  const telechargerCsv = (csv: string, suffixe: string) => {
+    const safeName = name.replace(/[^a-z0-9]/gi, "_");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vigil_${safeName}_${toMonthStr(range.from.y, range.from.m)}_${toMonthStr(range.to.y, range.to.m)}${suffixe}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const handleExportPoints = async () => {
+    if (!onExportPoints) return;
+    setPtsMsg(""); setPtsBusy(true);
+    try {
+      const r = await onExportPoints();
+      if (!r || !r.n) { setPtsMsg("No detection in this zone and period."); return; }
+      telechargerCsv(r.csv, "_detections");
+      setPtsMsg(`${r.n.toLocaleString("en-US")} detections exported.`);
+    } catch (e) {
+      setPtsMsg(`Export failed: ${String((e as Error).message || e)}`);
+    } finally { setPtsBusy(false); }
+  };
 
   const handleExport = () => {
     setExportErr("");
@@ -821,6 +848,16 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
           Export CSV
         </button>
         {exportErr && <p role="alert" className="hd-rc-fielderr" style={{ marginTop: 6 }}>{exportErr}</p>}
+        {onExportPoints && (
+          <>
+            <button className="hd-rc-apply hd-rc-export2" onClick={handleExportPoints} disabled={ptsBusy} aria-label="Export every satellite detection of the zone and period as CSV"
+              title="Every NASA FIRMS detection (raw, all satellites, not harmonized) in the zone and study period, with the reason when it is not counted">
+              {ptsBusy ? "Preparing…" : "Export detections (CSV)"}
+            </button>
+            <p className="hd-rc-hint">Monthly series above: harmonized. Detections: raw FIRMS points (Greece).</p>
+            {ptsMsg && <p role="status" className="hd-rc-hint">{ptsMsg}</p>}
+          </>
+        )}
       </div>
     </div>
   );
@@ -1723,6 +1760,45 @@ export default function Vigil() {
       : `${fmtInt(serie.hexagones.length)} H3 res-5 hexagons (centre inside) · band: ${serie.table === "hotspots_sous_pays" ? "sub-country table" : serie.table === "hotspots" ? "country table (not validated below country scale)" : "unavailable"}${petiteZone ? " · indicative band (zone smaller than the tested zones)" : ""}`;
   const fiabFaible = serie?.source === "pays" && serie.fiabilite === "faible";
   const exporter = () => (zone && index ? exportCsv(zone, index, selRange) : null);
+  /** E9: the points file covers Greece only; a drawn zone qualifies when its box meets Greece's box. */
+  const GR = COUNTRIES.find((c) => c.name === PAYS_POINTS)!.bbox;
+  const pointsDispo = !!selection && (selection.region.pays === PAYS_POINTS
+    || (!selection.region.pays && selection.region.bbox[0] <= GR[1] && selection.region.bbox[1] >= GR[0] && selection.region.bbox[2] <= GR[3] && selection.region.bbox[3] >= GR[2]));
+  const exporterPoints = async (): Promise<{ csv: string; n: number } | null> => {
+    if (!selection || !index) return null;
+    const pays = selection.region.pays === PAYS_POINTS;
+    const de = texteMois(selRange.from.y, selRange.from.m), a = texteMois(selRange.to.y, selRange.to.m);
+    const ring = selection.ring, bbox = selection.region.bbox;
+    let tete = "", n = 0;
+    const out: string[] = [];
+    for (let y = selRange.from.y; y <= selRange.to.y; y++) {
+      let f: { tete: string; lignes: string[] };
+      try { f = await chargerLignesGrece(y); } catch (e) {
+        if (e instanceof ErreurDonnees && e.statut === 404) continue; // year without file
+        throw e;
+      }
+      tete ||= f.tete;
+      const cols = f.tete.split(","), iLa = cols.indexOf("latitude"), iLo = cols.indexOf("longitude"), iD = cols.indexOf("acq_date");
+      for (const l of f.lignes) {
+        const x = l.split(","), mo = x[iD]?.slice(0, 7);
+        if (!mo || mo < de || mo > a) continue;
+        if (!pays) {
+          const la = +x[iLa], lo = +x[iLo];
+          if (la < bbox[0] || la > bbox[1] || lo < bbox[2] || lo > bbox[3] || !pip(lo, la, ring)) continue;
+        }
+        out.push(l); n++;
+      }
+    }
+    if (!n) return { csv: "", n: 0 };
+    const csv =
+      `# Vigil - every NASA FIRMS active-fire detection in ${pays ? "Greece (FIRMS country files; 2026 = FIRMS World files cut to Greece)" : `the drawn zone (points inside it; Greece point file only)`}, ${de} to ${a}\n` +
+      `# RAW detections, all satellites (MODIS Terra/Aqua 1 km, VIIRS S-NPP/NOAA-20 375 m), NOT harmonized: one fire is usually seen by several passes and satellites.\n` +
+      `# categorie = why a detection is not counted (confiance_basse = low confidence, industriel_G6 = industrial/fixed site, volcan_ou_offshore, quasi_doublon = near-duplicate); retenu_vegetation = counted.\n` +
+      `# compte_calendrier = kept by cleaning (any satellite). The harmonized monthly series uses MODIS Aqua until 2020-10 and VIIRS S-NPP (NOAA-20 on S-NPP gaps) after, converted with VIGIL-K1: its totals differ from a count of these rows.\n` +
+      `# acq_time = HHMM UTC; frp = MW (raw); confidence: MODIS 0-100, VIIRS l/n/h. Source: NASA FIRMS (https://firms.modaps.eosdis.nasa.gov). Generated ${index.genere_le}. ${n} rows.\n` +
+      tete + "\n" + out.join("\n") + "\n";
+    return { csv, n };
+  };
 
   if (erreur) {
     return (
@@ -1856,6 +1932,7 @@ export default function Vigil() {
                 onApplyBbox={handleApplyBbox}
                 bornes={bornes}
                 onExport={exporter}
+                onExportPoints={pointsDispo ? exporterPoints : null}
                 ready={!!zone}
               />
             </div>
@@ -2230,6 +2307,8 @@ const CSS = `
 .hd-mapkey-pts i{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 4px;vertical-align:0;box-shadow:0 0 0 1px #0f172a}
 .hd-mapkey-pts i.hollow{background:transparent;box-shadow:0 0 0 1.2px #94a3b8}
 .hd-ytd{display:block;width:100%;font-size:10.5px;color:var(--tx);margin-top:2px}
+.hd-rc-export2{width:100%;margin-top:7px}
+.hd-rc-hint{margin:5px 0 0;font-size:10.5px;line-height:1.35;color:var(--mut)}
 .hd-calview{display:flex;flex-direction:column;gap:5px;margin:2px 0 4px}
 .hd-calview-tabs{display:flex;gap:3px;padding:3px;border-radius:9px;background:rgba(15,23,42,.06)}
 .hd-calview-tabs button{flex:1;border:0;background:transparent;padding:5px 4px;border-radius:7px;font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;white-space:nowrap}
