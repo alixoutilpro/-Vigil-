@@ -1,0 +1,1600 @@
+"use client";
+
+/**
+ * Vigil - MODIS / VIIRS hotspot harmonization. Map-first single-file component.
+ * Map: MapLibre GL (globe), Esri satellite imagery. All fire data is synthetic.
+ * Region time series come from data/data.json (pillar 6 output contract) when it has cells
+ * inside the region bbox; otherwise they fall back to the seeded generator.
+ */
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import "maplibre-gl/dist/maplibre-gl.css";
+import contractData from "../data/data.json";
+import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Types & constants                                                          */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+type Variant = "raw" | "harm";
+type Metric = "count" | "frp";
+type FireType = "all" | "wild" | "agri";
+type V3 = [number, number, number];
+type Ring = [number, number][];
+
+interface AnomalyDef {
+  y: number;
+  m: number[];
+  k: number;
+}
+
+export interface RegionDef {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  /** [latMin, latMax, lonMin, lonMax] */
+  bbox: [number, number, number, number];
+  scale: number;
+  peak: number;
+  width: number;
+  floor: number;
+  ext: number;
+  earlier: number;
+  trend: number;
+  wild: number;
+  frp: number;
+  anomalies: AnomalyDef[];
+  color: string;
+  custom?: boolean;
+}
+
+export interface Cell {
+  y: number;
+  m: number;
+  modis: number;
+  viirs: number;
+  mFrp: number;
+  vFrp: number;
+  mEff: number; // MODIS coverage efficiency (Terra-only era = 0.6)
+  hasV: boolean;
+  wild: number;
+  /** Harmonized total from the pillar 6 contract (sum of harmonized_fire_days); overrides the nominal-ratio conversion. */
+  harm?: number;
+}
+
+/** One row of data/data.json — the frozen pillar 6 output contract. */
+interface ContractRow {
+  cell_id: string;
+  lat: number;
+  lon: number;
+  iso_year: number;
+  iso_week: number;
+  modis_fire_days: number | null;
+  viirs_fire_days: number | null;
+  harmonized_fire_days: number;
+  harmonized_low: number;
+  harmonized_high: number;
+  land_cover_class: "forest" | "cropland" | "shrub_grass" | "other";
+  source: "modis_only" | "viirs_converted" | "both";
+}
+
+interface CellVal {
+  total: number;
+  modis: number;
+  viirs: number;
+}
+
+interface DateRange {
+  from: { y: number; m: number };
+  to: { y: number; m: number };
+}
+
+const Y0 = 2000;
+const Y1 = 2026;
+const NY = Y1 - Y0 + 1;
+const LAST_MONTH_Y1 = 9; // data through Oct 2026
+const FIRST_MONTH_Y0 = 10; // MODIS active fire starts Nov 2000
+const VIIRS_START = { y: 2012, m: 1 }; // Feb 2012
+const R_NOM = 2.5; // nominal VIIRS(375m)/MODIS(1km) pixel-count ratio used for harmonization
+const VFRP_BIAS = 1.12; // nominal VIIRS FRP sensitivity bias
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const D2R = Math.PI / 180;
+
+export const REGIONS: RegionDef[] = [
+  {
+    id: "med", name: "Mediterranean Basin", lat: 38, lon: 15, bbox: [30, 46, -10, 36],
+    scale: 1800, peak: 7.3, width: 1.35, floor: 0.04, ext: 0.32, earlier: 0.45, trend: 0.012,
+    wild: 0.62, frp: 22, color: "#ea580c",
+    anomalies: [{ y: 2007, m: [6, 7], k: 1.9 }, { y: 2021, m: [6, 7], k: 2.2 }, { y: 2026, m: [6, 7, 8], k: 2.9 }],
+  },
+  {
+    id: "cal", name: "California", lat: 37, lon: -120, bbox: [32, 42.5, -124.5, -114],
+    scale: 900, peak: 8.6, width: 1.5, floor: 0.05, ext: 0.4, earlier: 0.5, trend: 0.015,
+    wild: 0.85, frp: 38, color: "#dc2626",
+    anomalies: [{ y: 2018, m: [7, 8, 10], k: 2.4 }, { y: 2020, m: [7, 8, 9], k: 2.9 }, { y: 2021, m: [7, 8], k: 1.8 }],
+  },
+  {
+    id: "amz", name: "Amazon", lat: -8, lon: -60, bbox: [-18, 5, -74, -46],
+    scale: 6000, peak: 8.6, width: 1.15, floor: 0.06, ext: 0.25, earlier: 0.25, trend: 0.006,
+    wild: 0.35, frp: 30, color: "#f97316",
+    anomalies: [{ y: 2005, m: [7, 8, 9], k: 1.9 }, { y: 2010, m: [7, 8, 9], k: 2.1 }, { y: 2019, m: [7, 8], k: 1.9 }, { y: 2024, m: [7, 8, 9], k: 2.3 }],
+  },
+  {
+    id: "aus", name: "Australia", lat: -25, lon: 135, bbox: [-39, -10, 113, 154],
+    scale: 3500, peak: 10.6, width: 1.7, floor: 0.07, ext: 0.3, earlier: 0.4, trend: 0.008,
+    wild: 0.75, frp: 26, color: "#ea580c",
+    anomalies: [{ y: 2019, m: [8, 9, 10, 11], k: 2.5 }, { y: 2020, m: [0], k: 2.4 }, { y: 2023, m: [9, 10], k: 1.7 }],
+  },
+  {
+    id: "pam", name: "Argentine Pampas & Patagonia", lat: -36, lon: -64, bbox: [-42, -30, -75, -55],
+    scale: 1400, peak: 8.4, width: 1.3, floor: 0.05, ext: 0.3, earlier: 0.3, trend: 0.008,
+    wild: 0.4, frp: 22, color: "#f97316",
+    anomalies: [{ y: 2022, m: [0, 1, 2], k: 2.2 }],
+  },
+  {
+    id: "afr", name: "Sub-Saharan Africa", lat: 0, lon: 15, bbox: [-15, 15, -8, 38],
+    scale: 9000, peak: 0.8, width: 1.6, floor: 0.08, ext: 0.2, earlier: 0.2, trend: 0.004,
+    wild: 0.3, frp: 24, color: "#ea580c", anomalies: [],
+  },
+  {
+    id: "sea", name: "Southeast Asia", lat: 10, lon: 106, bbox: [-3, 24, 95, 118],
+    scale: 3000, peak: 2.8, width: 1.2, floor: 0.06, ext: 0.25, earlier: 0.3, trend: 0.006,
+    wild: 0.45, frp: 20, color: "#dc2626",
+    anomalies: [{ y: 2015, m: [8, 9], k: 2.4 }, { y: 2019, m: [8, 9], k: 2.0 }],
+  },
+];
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Utilities                                                                  */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(a: number) {
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function gauss(r: () => number) {
+  const u = Math.max(r(), 1e-9);
+  const v = r();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+const fmtLat = (v: number) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? "N" : "S"}`;
+const fmtLon = (v: number) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? "E" : "W"}`;
+const fmtInt = (n: number) => Math.round(n).toLocaleString("en-US");
+function fmtCompact(n: number): string {
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (a >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (a >= 1e4) return (n / 1e3).toFixed(0) + "k";
+  if (a >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(Math.round(n));
+}
+const unit = (m: Metric) => (m === "count" ? "px" : "MW");
+
+function lonLatVec(lon: number, lat: number): V3 {
+  const l = lon * D2R;
+  const p = lat * D2R;
+  return [Math.cos(p) * Math.sin(l), Math.sin(p), Math.cos(p) * Math.cos(l)];
+}
+function angDist(lon1: number, lat1: number, lon2: number, lat2: number): number {
+  const a = lonLatVec(lon1, lat1);
+  const b = lonLatVec(lon2, lat2);
+  return Math.acos(clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1, 1)) / D2R;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Mock data generation                                                       */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+export function makeCustomRegion(lat: number, lon: number): RegionDef {
+  const la = Math.round(lat * 10) / 10;
+  const lo = Math.round(lon * 10) / 10;
+  const id = `custom:${la},${lo}`;
+  const rng = mulberry32(hashStr(id));
+  const a = Math.abs(la);
+  const peak = la >= 0 ? (a > 45 ? 6.9 : a > 20 ? 7.9 : 8.4) : a > 20 ? 10.6 : 8.8;
+  const pm = Math.round(peak - 0.5);
+  const anomalies: AnomalyDef[] = [{ y: 2010 + Math.floor(rng() * 10), m: [pm, (pm + 1) % 12], k: 1.8 + rng() * 0.6 }];
+  if (rng() < 0.55) {
+    anomalies.push(pm > 8 ? { y: 2025, m: [10, 11], k: 2.4 + rng() } : { y: 2026, m: [pm - 1, pm], k: 2.4 + rng() });
+  }
+  return {
+    id, custom: true,
+    name: `Custom ${fmtLat(la)} ${fmtLon(lo)}`,
+    lat: la, lon: lo,
+    bbox: [clamp(la - 8, -90, 90), clamp(la + 8, -90, 90), lo - 10, lo + 10],
+    scale: 600 + rng() * 3000, peak, width: 1.1 + rng() * 0.6, floor: 0.04,
+    ext: 0.2 + rng() * 0.2, earlier: 0.2 + rng() * 0.3, trend: 0.004 + rng() * 0.01,
+    wild: 0.4 + rng() * 0.4, frp: 18 + rng() * 20, anomalies, color: "#dc2626",
+  };
+}
+
+/** Deterministic synthetic monthly archive, 2000-11 → 2026-10, with both sensors. */
+export function generateRegionData(r: RegionDef): (Cell | null)[][] {
+  const rng = mulberry32(hashStr(r.id));
+  const R_TRUE = R_NOM * (1 + (rng() - 0.5) * 0.12);
+  const yearFactor = Array.from({ length: NY }, () => Math.exp(gauss(rng) * 0.17));
+  const out: (Cell | null)[][] = [];
+  for (let yi = 0; yi < NY; yi++) {
+    const y = Y0 + yi;
+    const row: (Cell | null)[] = [];
+    const frac = yi / (NY - 1);
+    for (let m = 0; m < 12; m++) {
+      if ((y === Y0 && m < FIRST_MONTH_Y0) || (y === Y1 && m > LAST_MONTH_Y1)) {
+        row.push(null);
+        continue;
+      }
+      const t = m + 0.5;
+      const peak = r.peak - r.earlier * frac * 0.6;
+      const width = r.width + r.ext * frac * 0.6;
+      let d = Math.abs(t - peak);
+      d = Math.min(d, 12 - d);
+      const season = r.floor + Math.exp(-0.5 * (d / width) ** 2);
+      let mult = 1;
+      for (const a of r.anomalies) if (a.y === y && a.m.includes(m)) mult *= 1 + (a.k - 1) * 0.55;
+      const L = r.scale * season * (1 + r.trend * yi) * yearFactor[yi] * Math.exp(gauss(rng) * 0.12) * mult;
+
+      const terraOnly = y < 2002 || (y === 2002 && m < 6);
+      const mEff = terraOnly ? 0.6 : 1;
+      const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
+      const modis = L * mEff * Math.exp(gauss(rng) * 0.06);
+      const viirs = hasV ? L * R_TRUE * Math.exp(gauss(rng) * 0.06) : 0;
+      const mFrp = modis * r.frp * Math.exp(gauss(rng) * 0.05);
+      const vFrp = hasV ? L * r.frp * VFRP_BIAS * Math.exp(gauss(rng) * 0.05) : 0;
+      const wild = clamp(r.wild + 0.15 * Math.cos((2 * Math.PI * (t - r.peak)) / 12), 0.1, 0.95);
+      row.push({ y, m, modis: Math.round(modis), viirs: Math.round(viirs), mFrp: Math.round(mFrp), vFrp: Math.round(vFrp), mEff, hasV, wild });
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+/* ── Pillar 6 contract → monthly cells ───────────────────────────────────── */
+
+const CONTRACT = contractData as unknown as ContractRow[];
+const WILD_BY_LC: Record<ContractRow["land_cover_class"], number> = { forest: 0.85, shrub_grass: 0.85, cropland: 0.15, other: 0.5 };
+
+/** Month index (0-11) and year of the Thursday of an ISO week (ISO year / month attribution). */
+function isoWeekMonth(isoYear: number, isoWeek: number): { y: number; m: number } {
+  const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+  const dow = jan4.getUTCDay() || 7;
+  const thu = new Date(Date.UTC(isoYear, 0, 4 + (isoWeek - 1) * 7 + (4 - dow)));
+  return { y: thu.getUTCFullYear(), m: thu.getUTCMonth() };
+}
+
+let CONTRACT_END: { y: number; m: number } | null = null;
+function contractEnd() {
+  if (CONTRACT_END) return CONTRACT_END;
+  let best = { y: 0, m: 0 };
+  for (const r of CONTRACT) {
+    const k = isoWeekMonth(r.iso_year, r.iso_week);
+    if (k.y > best.y || (k.y === best.y && k.m > best.m)) best = k;
+  }
+  return (CONTRACT_END = best);
+}
+
+/** Monthly cells for a region from data/data.json, or null when no contract cell lies in its bbox. */
+function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
+  const [la0, la1, lo0, lo1] = r.bbox;
+  const rows = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
+  if (!rows.length) return null;
+  const acc = Array.from({ length: NY }, () =>
+    Array.from({ length: 12 }, () => ({ modis: 0, viirs: 0, harm: 0, wild: 0 })));
+  let first = { y: 9999, m: 0 };
+  for (const c of rows) {
+    const k = isoWeekMonth(c.iso_year, c.iso_week);
+    if (k.y < Y0 || k.y > Y1) continue;
+    if (k.y < first.y || (k.y === first.y && k.m < first.m)) first = k;
+    const a = acc[k.y - Y0][k.m];
+    a.modis += c.modis_fire_days ?? 0;
+    a.viirs += c.viirs_fire_days ?? 0;
+    a.harm += c.harmonized_fire_days;
+    a.wild += c.harmonized_fire_days * WILD_BY_LC[c.land_cover_class];
+  }
+  const end = contractEnd();
+  return acc.map((row, yi) =>
+    row.map((a, m): Cell | null => {
+      const y = Y0 + yi;
+      if (y < first.y || (y === first.y && m < first.m) || y > end.y || (y === end.y && m > end.m)) return null;
+      const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
+      return {
+        y, m, modis: a.modis, viirs: a.viirs,
+        // FRP is not part of the contract: approximate from the region's mean FRP per fire-day.
+        mFrp: Math.round(a.modis * r.frp), vFrp: Math.round(a.viirs * r.frp * VFRP_BIAS),
+        mEff: 1, hasV, wild: a.harm > 0 ? a.wild / a.harm : r.wild, harm: a.harm,
+      };
+    }));
+}
+
+function regionData(r: RegionDef): (Cell | null)[][] {
+  return contractRegionData(r) ?? generateRegionData(r);
+}
+
+/** Value of a cell for a given harmonization variant / metric / fire-type filter. */
+export function cellStats(c: Cell, variant: Variant, metric: Metric, type: FireType): CellVal {
+  let m = metric === "count" ? c.modis : c.mFrp;
+  let v = metric === "count" ? c.viirs : c.vFrp;
+  if (variant === "harm" && metric === "count" && c.harm !== undefined) {
+    // Contract data: harmonized_fire_days already MODIS-equivalent; sensors shown as observed.
+    const f = type === "all" ? 1 : type === "wild" ? c.wild : 1 - c.wild;
+    return { total: c.harm * f, modis: m * f, viirs: v * f };
+  }
+  if (variant === "harm") {
+    m = m / c.mEff;
+    v = metric === "count" ? v / R_NOM : v / VFRP_BIAS;
+  }
+  let total = variant === "raw" ? m + v : c.hasV ? (m + v) / 2 : m;
+  let f = 1;
+  if (type !== "all") {
+    const w =
+      metric === "count" ? c.wild : (c.wild * 1.3) / (c.wild * 1.3 + (1 - c.wild) * 0.7);
+    f = type === "wild" ? w : 1 - w;
+  }
+  total *= f;
+  return { total, modis: m * f, viirs: v * f };
+}
+
+function monthlyValues(data: (Cell | null)[][], variant: Variant, metric: Metric, type: FireType): (CellVal | null)[][] {
+  return data.map((row) => row.map((c) => (c ? cellStats(c, variant, metric, type) : null)));
+}
+
+interface AnnualPt {
+  value: number | null;
+  est: boolean;
+}
+function annualSeries(vals: (CellVal | null)[][]): AnnualPt[] {
+  const sums = vals.map((r) => r.reduce((a, c) => a + (c ? c.total : 0), 0));
+  const isFull = vals.map((r) => r.every((c) => c !== null));
+  return vals.map((row, yi) => {
+    if (isFull[yi]) return { value: sums[yi], est: false };
+    const obsMonths = row.map((c, m) => (c ? m : -1)).filter((m) => m >= 0);
+    const ratios: number[] = [];
+    vals.forEach((r2, yj) => {
+      if (!isFull[yj] || sums[yj] <= 0) return;
+      ratios.push(obsMonths.reduce((a, m) => a + (r2[m] as CellVal).total, 0) / sums[yj]);
+    });
+    const frac = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : 0;
+    if (frac < 0.2) return { value: null, est: true };
+    return { value: sums[yi] / frac, est: true };
+  });
+}
+
+/* ── Season metrics ───────────────────────────────────────────────────────── */
+
+const MID_DOY = DAYS.map((d, i) => DAYS.slice(0, i).reduce((a, b) => a + b, 0) + d / 2);
+
+function dailyCurve(v: number[]): number[] {
+  const out: number[] = new Array(365);
+  for (let d = 0; d < 365; d++) {
+    let a: number, ma: number, mb: number;
+    if (d < MID_DOY[0]) {
+      a = 11; ma = MID_DOY[11] - 365; mb = MID_DOY[0];
+    } else {
+      a = 0;
+      for (let i = 0; i < 12; i++) if (MID_DOY[i] <= d) a = i;
+      ma = MID_DOY[a];
+      mb = a === 11 ? MID_DOY[0] + 365 : MID_DOY[a + 1];
+    }
+    const b = (a + 1) % 12;
+    const f = (d - ma) / (mb - ma);
+    out[d] = v[a] * (1 - f) + v[b] * f;
+  }
+  return out;
+}
+
+function climatology(vals: (CellVal | null)[][], y0: number, y1: number): number[] {
+  return Array.from({ length: 12 }, (_, m) => {
+    let s = 0, n = 0;
+    for (let y = y0; y <= y1; y++) {
+      const c = vals[y - Y0][m];
+      if (c) { s += c.total; n++; }
+    }
+    return n ? s / n : 0;
+  });
+}
+
+export interface SeasonKpi {
+  extensionDays: number;
+  onsetWeeks: number;
+  lenEarly: number;
+  lenLate: number;
+  saturated: boolean;
+}
+export function seasonKpi(vals: (CellVal | null)[][]): SeasonKpi {
+  const early = dailyCurve(climatology(vals, 2000, 2004));
+  const late = dailyCurve(climatology(vals, 2021, 2025));
+  let minDay = 0;
+  for (let i = 1; i < 365; i++) if (early[i] < early[minDay]) minDay = i;
+  const mn = Math.min(...early);
+  const mx = Math.max(...early);
+  const thr = mn + 0.3 * (mx - mn);
+  const stat = (d: number[]) => {
+    let len = 0, onset = -1;
+    for (let i = 0; i < 365; i++) {
+      if (d[(minDay + i) % 365] >= thr) { len++; if (onset < 0) onset = i; }
+    }
+    return { len, onset: onset < 0 ? 0 : onset };
+  };
+  const e = stat(early);
+  const l = stat(late);
+  return {
+    extensionDays: l.len - e.len,
+    onsetWeeks: (e.onset - l.onset) / 7,
+    lenEarly: e.len, lenLate: l.len,
+    saturated: l.len >= 360,
+  };
+}
+
+export interface AnomalyResult { z: number; y: number; m: number; value: number; mean: number; sd: number }
+export function anomalyScan(vals: (CellVal | null)[][]): AnomalyResult | null {
+  let best: AnomalyResult | null = null;
+  for (let k = 11; k >= 0; k--) {
+    let y = Y1, m = LAST_MONTH_Y1 - k;
+    if (m < 0) { m += 12; y -= 1; }
+    const cur = vals[y - Y0][m];
+    if (!cur) continue;
+    const base: number[] = [];
+    for (let by = 2000; by <= 2010; by++) { const c = vals[by - Y0][m]; if (c) base.push(c.total); }
+    if (base.length < 5) continue;
+    const mean = base.reduce((a, b) => a + b, 0) / base.length;
+    const sd0 = Math.sqrt(base.reduce((a, b) => a + (b - mean) ** 2, 0) / (base.length - 1));
+    const sd = Math.max(sd0, mean * 0.3);
+    if (sd <= 0) continue;
+    const z = (cur.total - mean) / sd;
+    if (!best || Math.abs(z) > Math.abs(best.z)) best = { z, y, m, value: cur.total, mean, sd };
+  }
+  return best;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Hotspot point generator (synthetic, deterministic per month)               */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+interface Cluster { id: string; lat: number; lon: number; sp: number; w: number; peak: number; width: number; frp: number }
+
+const EXTRA_CLUSTERS: Cluster[] = [
+  { id: "sib", lat: 60, lon: 105, sp: 6, w: 28, peak: 6.9, width: 1.0, frp: 24 },
+  { id: "can", lat: 55, lon: -110, sp: 5, w: 22, peak: 7.0, width: 1.1, frp: 30 },
+  { id: "caf", lat: -6, lon: 22, sp: 7, w: 90, peak: 7.5, width: 1.3, frp: 20 },
+  { id: "saf", lat: 8, lon: 8, sp: 6, w: 80, peak: 0.8, width: 1.2, frp: 18 },
+  { id: "ind", lat: 23, lon: 80, sp: 5, w: 40, peak: 3.5, width: 1.0, frp: 16 },
+  { id: "idc", lat: 17, lon: 100, sp: 4, w: 45, peak: 2.8, width: 0.9, frp: 17 },
+  { id: "mex", lat: 20, lon: -100, sp: 4, w: 25, peak: 4.2, width: 0.9, frp: 21 },
+  { id: "arg", lat: -30, lon: -62, sp: 4, w: 25, peak: 8.6, width: 1.0, frp: 22 },
+  { id: "kaz", lat: 50, lon: 65, sp: 5, w: 18, peak: 7.8, width: 1.4, frp: 19 },
+  { id: "idn", lat: -2, lon: 112, sp: 5, w: 30, peak: 9.2, width: 1.0, frp: 27 },
+];
+let CLUSTERS_CACHE: Cluster[] | null = null;
+function getClusters(): Cluster[] {
+  if (CLUSTERS_CACHE) return CLUSTERS_CACHE;
+  const out: Cluster[] = [...EXTRA_CLUSTERS];
+  for (const r of REGIONS) {
+    const rng = mulberry32(hashStr("cl:" + r.id));
+    const [la0, la1, lo0, lo1] = r.bbox;
+    for (let k = 0; k < 3; k++) {
+      out.push({
+        id: `${r.id}${k}`, lat: la0 + (la1 - la0) * (0.2 + 0.6 * rng()), lon: lo0 + (lo1 - lo0) * (0.2 + 0.6 * rng()),
+        sp: Math.min(la1 - la0, lo1 - lo0) * 0.16, w: r.scale / 55, peak: r.peak, width: r.width + 0.1, frp: r.frp,
+      });
+    }
+  }
+  return (CLUSTERS_CACHE = out);
+}
+
+interface HotFeature {
+  type: "Feature";
+  geometry: { type: "Point"; coordinates: [number, number] };
+  properties: { frp: number; sensor: "MODIS" | "VIIRS"; date: string };
+}
+type HotCollection = { type: "FeatureCollection"; features: HotFeature[] };
+
+function buildHotspots(y: number, m: number, variant: Variant): HotCollection {
+  const features: HotFeature[] = [];
+  if ((y === Y0 && m < FIRST_MONTH_Y0) || y < Y0 || y > Y1 || (y === Y1 && m > LAST_MONTH_Y1)) return { type: "FeatureCollection", features };
+  const yi = y - Y0;
+  const frac = yi / (NY - 1);
+  const t = m + 0.5;
+  const terraOnly = y < 2002 || (y === 2002 && m < 6);
+  const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
+  const date = `${y}-${String(m + 1).padStart(2, "0")}`;
+  for (const c of getClusters()) {
+    const rng = mulberry32(hashStr(`${c.id}:${y}-${m}`));
+    const peak = c.peak - 0.3 * frac;
+    let d = Math.abs(t - peak);
+    d = Math.min(d, 12 - d);
+    const season = 0.03 + Math.exp(-0.5 * (d / (c.width + 0.2 * frac)) ** 2);
+    const n = c.w * season * (1 + 0.012 * yi) * Math.exp(gauss(rng) * 0.2);
+    const nM = Math.round(n * (terraOnly ? 0.6 : 1));
+    const nV = hasV ? Math.round(n * (variant === "raw" ? R_NOM : 1)) : 0;
+    const coslat = Math.max(0.2, Math.cos(c.lat * D2R));
+    const emit = (cnt: number, sensor: "MODIS" | "VIIRS") => {
+      for (let i = 0; i < cnt; i++) {
+        const lat = clamp(c.lat + gauss(rng) * c.sp, -85, 85);
+        const lon = c.lon + (gauss(rng) * c.sp) / coslat;
+        let frp = c.frp * Math.exp(gauss(rng) * 0.8);
+        if (sensor === "VIIRS" && variant === "raw") frp = (frp * VFRP_BIAS) / R_NOM;
+        features.push({ type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: { frp: Math.round(frp * 10) / 10, sensor, date } });
+      }
+    };
+    if (variant === "raw") {
+      emit(nM, "MODIS");
+      emit(nV, "VIIRS");
+    } else if (hasV) {
+      emit(Math.round(n / 2), "MODIS");
+      emit(Math.round(n / 2), "VIIRS");
+    } else emit(Math.round(n * (terraOnly ? 1 : 1)), "MODIS");
+  }
+  return { type: "FeatureCollection", features };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Geometry helpers                                                           */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const rectRing = (b: [number, number, number, number]): Ring => {
+  const [la0, la1, lo0, lo1] = b;
+  return [[lo0, la0], [lo1, la0], [lo1, la1], [lo0, la1], [lo0, la0]];
+};
+function pip(x: number, y: number, ring: Ring): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function regionFromRing(ring: Ring): RegionDef {
+  const lons = ring.map((p) => p[0]), lats = ring.map((p) => p[1]);
+  const lonMin = Math.min(...lons), lonMax = Math.max(...lons), latMin = Math.min(...lats), latMax = Math.max(...lats);
+  const base = makeCustomRegion((latMin + latMax) / 2, (lonMin + lonMax) / 2);
+  const area = (latMax - latMin) * (lonMax - lonMin);
+  return {
+    ...base, name: "Custom Selection", bbox: [latMin, latMax, lonMin, lonMax],
+    scale: base.scale * clamp(Math.sqrt(area / 320), 0.4, 3),
+  };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Export helper (replace body when real FIRMS data is available)             */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+interface ExportRow {
+  latitude: number;
+  longitude: number;
+  acq_date: string;
+  sensor: string;
+  frp: number;
+  data_status: string;
+}
+
+function getHotspotsForExport(ring: Ring, range: DateRange): { rows: ExportRow[]; count: number } {
+  const rows: ExportRow[] = [];
+  for (let y = range.from.y; y <= range.to.y; y++) {
+    const mStart = y === range.from.y ? range.from.m : 0;
+    const mEnd = y === range.to.y ? range.to.m : 11;
+    for (let m = mStart; m <= mEnd; m++) {
+      const hots = buildHotspots(y, m, "raw");
+      for (const f of hots.features) {
+        const [lon, lat] = f.geometry.coordinates;
+        if (pip(lon, lat, ring)) {
+          rows.push({
+            latitude: lat,
+            longitude: lon,
+            acq_date: f.properties.date,
+            sensor: f.properties.sensor,
+            frp: f.properties.frp,
+            data_status: "SIMULATED",
+          });
+        }
+      }
+    }
+  }
+  return { rows, count: rows.length };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Map styles                                                                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services";
+const SAT_STYLE: StyleSpecification = {
+  version: 8,
+  sources: {
+    sat: { type: "raster", tiles: [`${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`], tileSize: 256, maxzoom: 19, attribution: "Esri, Maxar, Earthstar Geographics" },
+    roads: { type: "raster", tiles: [`${ESRI}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`], tileSize: 256, maxzoom: 19 },
+    places: { type: "raster", tiles: [`${ESRI}/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}`], tileSize: 256, maxzoom: 19 },
+  },
+  layers: [
+    { id: "sat", type: "raster", source: "sat" },
+    { id: "roads", type: "raster", source: "roads", paint: { "raster-opacity": 0.85 } },
+    { id: "places", type: "raster", source: "places" },
+  ],
+};
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* UI helpers                                                                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const HEAT_STOPS: [number, [number, number, number]][] = [
+  [0, [254, 243, 199]], [0.25, [252, 211, 77]], [0.5, [251, 146, 60]], [0.72, [234, 88, 12]], [0.88, [220, 38, 38]], [1, [127, 29, 29]],
+];
+function heatColor(t: number): string {
+  t = clamp(t, 0, 1);
+  for (let i = 1; i < HEAT_STOPS.length; i++) {
+    if (t <= HEAT_STOPS[i][0]) {
+      const [t0, c0] = HEAT_STOPS[i - 1];
+      const [t1, c1] = HEAT_STOPS[i];
+      const f = (t - t0) / (t1 - t0);
+      return `rgb(${c0.map((c, k) => Math.round(c + (c1[k] - c) * f)).join(",")})`;
+    }
+  }
+  return "rgb(127,29,29)";
+}
+function niceTicks(max: number, n = 3): number[] {
+  if (max <= 0) return [0, 1];
+  const raw = max / n;
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const f = raw / p;
+  const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+  const out: number[] = [];
+  for (let v = 0; v <= max + step * 0.999; v += step) out.push(v);
+  return out;
+}
+function Seg<T extends string>(props: { label: string; value: T; options: { v: T; t: string }[]; onChange: (v: T) => void }) {
+  return (
+    <div className="hd-seg" role="radiogroup" aria-label={props.label}>
+      {props.options.map((o) => (
+        <button key={o.v} role="radio" aria-checked={props.value === o.v} className={props.value === o.v ? "on" : ""} onClick={() => props.onChange(o.v)}>
+          {o.t}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* RegionAnalysisSlot — placeholder for future region report                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+function RegionAnalysisSlot(_props: { region: RegionDef; range: DateRange }) {
+  return (
+    <div className="hd-analysis-slot">
+      <div className="hd-analysis-title">Analysis</div>
+      <p className="hd-analysis-soon">Coming soon: region report for firefighters and land managers</p>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* RegionCard                                                                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+interface RegionCardProps {
+  selection: { region: RegionDef; ring: Ring; wasPolygon: boolean };
+  name: string;
+  onRename: (name: string) => void;
+  range: DateRange;
+  onRangeChange: (r: DateRange) => void;
+  onApplyBbox: (bbox: [number, number, number, number], name: string) => void;
+}
+
+function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBbox }: RegionCardProps) {
+  const { region, wasPolygon } = selection;
+
+  /* ── Rename ── */
+  const [renaming, setRenaming] = useState(false);
+  const [nameInput, setNameInput] = useState(name);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { setNameInput(name); setRenaming(false); }, [name]);
+  useEffect(() => { if (renaming) nameInputRef.current?.focus(); }, [renaming]);
+
+  const commitRename = () => {
+    const v = nameInput.trim().slice(0, 40);
+    if (v) onRename(v); else setNameInput(name);
+    setRenaming(false);
+  };
+  const cancelRename = () => { setNameInput(name); setRenaming(false); };
+
+  /* ── Bbox inputs ── */
+  const [lat0, setLat0] = useState(region.bbox[0].toFixed(2));
+  const [lat1, setLat1] = useState(region.bbox[1].toFixed(2));
+  const [lon0, setLon0] = useState(region.bbox[2].toFixed(2));
+  const [lon1, setLon1] = useState(region.bbox[3].toFixed(2));
+  const [bboxErr, setBboxErr] = useState({ lat0: "", lat1: "", lon0: "", lon1: "" });
+
+  useEffect(() => {
+    setLat0(region.bbox[0].toFixed(2));
+    setLat1(region.bbox[1].toFixed(2));
+    setLon0(region.bbox[2].toFixed(2));
+    setLon1(region.bbox[3].toFixed(2));
+    setBboxErr({ lat0: "", lat1: "", lon0: "", lon1: "" });
+  }, [region.bbox]);
+
+  const validateAndApplyBbox = () => {
+    const v0 = parseFloat(lat0), v1 = parseFloat(lat1), v2 = parseFloat(lon0), v3 = parseFloat(lon1);
+    const e = { lat0: "", lat1: "", lon0: "", lon1: "" };
+    if (isNaN(v0) || v0 < -90 || v0 > 90) e.lat0 = "Lat min must be between −90 and 90";
+    if (isNaN(v1) || v1 < -90 || v1 > 90) e.lat1 = "Lat max must be between −90 and 90";
+    if (isNaN(v2) || v2 < -180 || v2 > 180) e.lon0 = "Lon min must be between −180 and 180";
+    if (isNaN(v3) || v3 < -180 || v3 > 180) e.lon1 = "Lon max must be between −180 and 180";
+    if (!e.lat0 && !e.lat1 && v0 >= v1) e.lat0 = "Lat min must be lower than Lat max";
+    if (!e.lon0 && !e.lon1 && v2 >= v3) e.lon0 = "Lon min must be lower than Lon max";
+    setBboxErr(e);
+    if (!e.lat0 && !e.lat1 && !e.lon0 && !e.lon1) onApplyBbox([v0, v1, v2, v3], name);
+  };
+
+  const hasErr = Object.values(bboxErr).some(Boolean);
+
+  const bboxFields: Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string }> = [
+    { id: "lat0", label: "Lat min", val: lat0, onChange: setLat0, err: bboxErr.lat0 },
+    { id: "lat1", label: "Lat max", val: lat1, onChange: setLat1, err: bboxErr.lat1 },
+    { id: "lon0", label: "Lon min", val: lon0, onChange: setLon0, err: bboxErr.lon0 },
+    { id: "lon1", label: "Lon max", val: lon1, onChange: setLon1, err: bboxErr.lon1 },
+  ];
+
+  /* ── Date range ── */
+  const toMonthStr = (y: number, m: number) => `${y}-${String(m + 1).padStart(2, "0")}`;
+  const fromMonthStr = (s: string) => { const [y, m] = s.split("-").map(Number); return { y, m: m - 1 }; };
+  const minMonth = toMonthStr(Y0, FIRST_MONTH_Y0);
+  const maxMonth = toMonthStr(LATEST.y, LATEST.m);
+  const [rangeErr, setRangeErr] = useState("");
+
+  const handleFromChange = (val: string) => {
+    const f = fromMonthStr(val);
+    if (f.y > range.to.y || (f.y === range.to.y && f.m > range.to.m)) {
+      setRangeErr("From must be earlier than To");
+    } else {
+      setRangeErr("");
+      onRangeChange({ ...range, from: f });
+    }
+  };
+  const handleToChange = (val: string) => {
+    const t = fromMonthStr(val);
+    if (range.from.y > t.y || (range.from.y === t.y && range.from.m > t.m)) {
+      setRangeErr("From must be earlier than To");
+    } else {
+      setRangeErr("");
+      onRangeChange({ ...range, to: t });
+    }
+  };
+
+  /* ── Export ── */
+  const [exportErr, setExportErr] = useState("");
+
+  const handleExport = () => {
+    setExportErr("");
+    const { rows, count } = getHotspotsForExport(selection.ring, range);
+    if (count > 200000) {
+      setExportErr(`Too many rows (${count.toLocaleString("en-US")}). Reduce the area or time period.`);
+      return;
+    }
+    const safeName = name.replace(/[^a-z0-9]/gi, "_");
+    const fromStr = toMonthStr(range.from.y, range.from.m);
+    const toStr = toMonthStr(range.to.y, range.to.m);
+    const header = "latitude,longitude,acq_date,sensor,frp,data_status\n";
+    const body = rows.map((r) => `${r.latitude},${r.longitude},${r.acq_date},${r.sensor},${r.frp},${r.data_status}`).join("\n");
+    const blob = new Blob([header + body], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `vigil_${safeName}_${fromStr}_${toStr}_SIMULATED.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="hd-region-card">
+      {/* 1. Title + Rename */}
+      <div className="hd-rc-titlerow">
+        {renaming ? (
+          <input
+            ref={nameInputRef}
+            id="hd-rc-nameinput"
+            className="hd-rc-nameinput hd-mono"
+            value={nameInput}
+            maxLength={40}
+            aria-label="Region name"
+            onChange={(e) => setNameInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") cancelRename(); }}
+            onBlur={commitRename}
+          />
+        ) : (
+          <span className="hd-mono hd-name">{name}</span>
+        )}
+        {!renaming && (
+          <button
+            className="hd-rc-rename"
+            aria-label="Rename region"
+            onClick={() => { setNameInput(name); setRenaming(true); }}
+          >
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M9.5 2.5l2 2-7 7H2.5v-2l7-7z" />
+            </svg>
+            Rename
+          </button>
+        )}
+      </div>
+
+      {/* 2. Coordinates */}
+      <div className="hd-rc-section">
+        <div className="hd-rc-seclabel">Coordinates</div>
+        {wasPolygon && (
+          <p className="hd-rc-note">Editing coordinates converts the polygon to a rectangle</p>
+        )}
+        <div className="hd-rc-grid4">
+          {bboxFields.map(({ id, label, val, onChange, err }) => (
+            <div key={id} className="hd-rc-field">
+              <label htmlFor={`hd-bbox-${id}`} className="hd-rc-fieldlabel">{label}</label>
+              <input
+                id={`hd-bbox-${id}`}
+                type="number"
+                step="0.01"
+                className={"hd-rc-fieldinput" + (err ? " err" : "")}
+                value={val}
+                aria-describedby={err ? `hd-bbox-${id}-err` : undefined}
+                onChange={(e) => onChange(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && validateAndApplyBbox()}
+              />
+              {err && <span id={`hd-bbox-${id}-err`} role="alert" className="hd-rc-fielderr">{err}</span>}
+            </div>
+          ))}
+        </div>
+        <button
+          className="hd-rc-apply"
+          aria-label="Apply coordinate changes to map"
+          disabled={hasErr}
+          onClick={validateAndApplyBbox}
+        >
+          Apply
+        </button>
+      </div>
+
+      {/* 3. Study period */}
+      <div className="hd-rc-section">
+        <div className="hd-rc-seclabel">Study period</div>
+        <div className="hd-rc-rangerow">
+          <div className="hd-rc-field">
+            <label htmlFor="hd-range-from" className="hd-rc-fieldlabel">From</label>
+            <input
+              id="hd-range-from"
+              type="month"
+              className="hd-rc-monthinput"
+              min={minMonth}
+              max={maxMonth}
+              value={toMonthStr(range.from.y, range.from.m)}
+              onChange={(e) => handleFromChange(e.target.value)}
+            />
+          </div>
+          <div className="hd-rc-field">
+            <label htmlFor="hd-range-to" className="hd-rc-fieldlabel">To</label>
+            <input
+              id="hd-range-to"
+              type="month"
+              className="hd-rc-monthinput"
+              min={minMonth}
+              max={maxMonth}
+              value={toMonthStr(range.to.y, range.to.m)}
+              onChange={(e) => handleToChange(e.target.value)}
+            />
+          </div>
+        </div>
+        {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
+      </div>
+
+      {/* 4. Analysis slot */}
+      <RegionAnalysisSlot region={region} range={range} />
+
+      {/* 5. Export CSV */}
+      <div className="hd-rc-section">
+        <button className="hd-rc-export" aria-label="Export hotspots as CSV" onClick={handleExport}>
+          Export CSV
+        </button>
+        {exportErr && <p role="alert" className="hd-rc-fielderr" style={{ marginTop: 6 }}>{exportErr}</p>}
+        <p className="hd-rc-simnote">Demo data — not real FIRMS detections</p>
+      </div>
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Main application                                                           */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+interface Selection { region: RegionDef; ring: Ring; wasPolygon: boolean }
+type Tool = "none" | "box" | "poly";
+
+const LATEST = { y: Y1, m: LAST_MONTH_Y1 };
+const EMPTY_FC = { type: "FeatureCollection" as const, features: [] as unknown[] };
+
+function ExpandIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true">
+      <path d="M8.5 1.5h4v4M12.5 1.5L8 6M5.5 12.5h-4v-4M1.5 12.5L6 8" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="square" />
+    </svg>
+  );
+}
+function CollapseIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true">
+      <path d="M13 5H9V1M9 5l4-4M1 9h4v4M5 9l-4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="square" />
+    </svg>
+  );
+}
+
+export default function Vigil() {
+  const [mode, setMode] = useState<Variant>("raw");
+  const metric: Metric = "count";
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [selectionName, setSelectionName] = useState("");
+  const [selRange, setSelRange] = useState<DateRange>({
+    from: { y: Y0, m: FIRST_MONTH_Y0 },
+    to: { y: LATEST.y, m: LATEST.m },
+  });
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [split, setSplit] = useState(false);
+  const [panelLeftOpen, setPanelLeftOpen] = useState(true);
+  const [tool, setTool] = useState<Tool>("none");
+  const [polyN, setPolyN] = useState(0);
+  const [date, setDate] = useState(LATEST);
+  const [ready, setReady] = useState(false);
+  const [tip, setTip] = useState<{ x: number; y: number; yi: number; m: number } | null>(null);
+  const [hoverYear, setHoverYear] = useState<number | null>(null);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<MLMap | null>(null);
+  const hotRef = useRef<HotCollection>({ type: "FeatureCollection", features: [] });
+  const selFcRef = useRef<unknown>(EMPTY_FC);
+  const draftRef = useRef<unknown>(EMPTY_FC);
+  const toolRef = useRef<Tool>("none");
+  const polyPts = useRef<Ring>([]);
+  const panelOpenRef = useRef(true);
+  const loadedRef = useRef(false);
+  const fitRef = useRef<(b: [number, number, number, number]) => void>(() => {});
+  const pendingFit = useRef<[number, number, number, number] | null>(null);
+  const finalizeRef = useRef<(ring: Ring, fromBox?: boolean) => void>(() => {});
+  const regionCounterRef = useRef(0);
+  toolRef.current = tool;
+  panelOpenRef.current = panelOpen;
+
+  /* ── Derived data ── */
+  const region = selection?.region ?? REGIONS[0];
+  const data = useMemo(() => regionData(region), [region]);
+  const rawVals = useMemo(() => monthlyValues(data, "raw", metric, "all"), [data, metric]);
+  const harmVals = useMemo(() => monthlyValues(data, "harm", metric, "all"), [data, metric]);
+  const vals = mode === "raw" ? rawVals : harmVals;
+  const rawAnnual = useMemo(() => annualSeries(rawVals), [rawVals]);
+  const harmAnnual = useMemo(() => annualSeries(harmVals), [harmVals]);
+  const heatMax = useMemo(() => {
+    const all: number[] = [];
+    vals.forEach((r) => r.forEach((c) => c && all.push(c.total)));
+    all.sort((a, b) => a - b);
+    return all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1;
+  }, [vals]);
+
+  const hotspots = useMemo(() => buildHotspots(date.y, date.m, mode), [date, mode]);
+
+  /* ── Map: push GeoJSON into sources ── */
+  const pushSources = useCallback(() => {
+    const m = mapRef.current;
+    if (!m) return;
+    (m.getSource("hotspots") as GeoJSONSource | undefined)?.setData(hotRef.current as never);
+    (m.getSource("sel") as GeoJSONSource | undefined)?.setData(selFcRef.current as never);
+    (m.getSource("draft") as GeoJSONSource | undefined)?.setData(draftRef.current as never);
+  }, []);
+
+  const setDraft = useCallback((fc: unknown) => { draftRef.current = fc; pushSources(); }, [pushSources]);
+  const draftBox = (a: [number, number], b: [number, number]) => ({
+    type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [rectRing([Math.min(a[1], b[1]), Math.max(a[1], b[1]), Math.min(a[0], b[0]), Math.max(a[0], b[0])])] } }],
+  });
+  const draftPoly = (pts: Ring, cursor?: [number, number]) => {
+    const feats: unknown[] = pts.map((p) => ({ type: "Feature", properties: {}, geometry: { type: "Point", coordinates: p } }));
+    const line = cursor ? [...pts, cursor] : pts;
+    if (line.length > 1) feats.push({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: line } });
+    if (pts.length > 2) feats.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[...pts, pts[0]]] } });
+    return { type: "FeatureCollection", features: feats };
+  };
+
+  /* ── Selection actions ── */
+  const fitTo = useCallback((b: [number, number, number, number]) => {
+    const m = mapRef.current;
+    if (!m) return;
+    if (!loadedRef.current) { pendingFit.current = b; return; }
+    const wide = window.innerWidth > 900;
+    m.fitBounds([[b[2], b[0]], [b[3], b[1]]], {
+      padding: { top: 90, left: 60, bottom: wide ? 60 : 340, right: wide && panelOpenRef.current ? 520 : 60 },
+      duration: 1400, maxZoom: 11,
+    });
+  }, []);
+
+  const applySelection = useCallback((
+    region: RegionDef,
+    ring: Ring,
+    name?: string,
+    wasPolygon = false,
+    resetRange = true,
+  ) => {
+    setSelection({ region, ring, wasPolygon });
+    setSelectionName(name ?? region.name);
+    if (resetRange) setSelRange({ from: { y: Y0, m: FIRST_MONTH_Y0 }, to: { y: LATEST.y, m: LATEST.m } });
+    setPanelOpen(true);
+    panelOpenRef.current = true;
+    selFcRef.current = { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [ring] } }] };
+    setDraft(EMPTY_FC);
+    fitTo(region.bbox);
+  }, [fitTo, setDraft]);
+
+  const handleApplyBbox = useCallback((bbox: [number, number, number, number], currentName: string) => {
+    const ring = rectRing(bbox);
+    const newRegion = { ...regionFromRing(ring), name: currentName, bbox };
+    applySelection(newRegion, ring, currentName, false, false);
+  }, [applySelection]);
+
+  fitRef.current = fitTo;
+  finalizeRef.current = (ring: Ring, fromBox = false) => {
+    if (ring.length < 3) return;
+    const closed: Ring = [...ring, ring[0]];
+    regionCounterRef.current += 1;
+    const name = `Region ${regionCounterRef.current}`;
+    applySelection(regionFromRing(closed), closed, name, !fromBox);
+    setTool("none");
+    polyPts.current = [];
+    setPolyN(0);
+  };
+
+  const clearSelection = () => {
+    setSplit(false);
+    setSelection(null);
+    setSelectionName("");
+    selFcRef.current = EMPTY_FC;
+    setDraft(EMPTY_FC);
+    polyPts.current = [];
+    setPolyN(0);
+    setTool("none");
+  };
+  const pickTool = (t: Tool) => {
+    polyPts.current = [];
+    setPolyN(0);
+    setDraft(EMPTY_FC);
+    setTool(tool === t ? "none" : t);
+  };
+  const finishPoly = () => {
+    const pts = polyPts.current.filter((p, i, a) => i === 0 || Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) > 1e-6);
+    finalizeRef.current(pts, false);
+  };
+
+  /* ── Map lifecycle ── */
+  useEffect(() => {
+    let cancelled = false;
+    let map: MLMap | null = null;
+    (async () => {
+      const maplibregl = (await import("maplibre-gl")).default;
+      if (cancelled || !containerRef.current) return;
+      map = new maplibregl.Map({
+        container: containerRef.current, style: SAT_STYLE, center: [12, 24], zoom: 2.1, maxPitch: 75,
+        attributionControl: { compact: true },
+      });
+      mapRef.current = map;
+      map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+      map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
+
+      const install = () => {
+        if (!map) return;
+        try { if (map.getProjection()?.type !== "globe") map.setProjection({ type: "globe" }); } catch { /* older style spec */ }
+        if (!map.getSource("hotspots")) {
+          map.addSource("hotspots", { type: "geojson", data: hotRef.current as never });
+          map.addSource("sel", { type: "geojson", data: selFcRef.current as never });
+          map.addSource("draft", { type: "geojson", data: draftRef.current as never });
+          map.addLayer({ id: "sel-fill", type: "fill", source: "sel", paint: { "fill-color": "#dc2626", "fill-opacity": 0.07 } });
+          map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
+          map.addLayer({
+            id: "hotspots", type: "circle", source: "hotspots",
+            paint: {
+              "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 1.4, 5, 2.6, 9, 5, 13, 9],
+              "circle-color": ["step", ["get", "frp"], "#fbbf24", 15, "#f97316", 40, "#ea580c", 90, "#dc2626"],
+              "circle-opacity": 0.85, "circle-stroke-color": "#ffffff", "circle-stroke-width": 0.5, "circle-stroke-opacity": 0.8,
+            },
+          });
+          map.addLayer({ id: "draft-fill", type: "fill", source: "draft", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#0f172a", "fill-opacity": 0.08 } });
+          map.addLayer({ id: "draft-line", type: "line", source: "draft", filter: ["any", ["==", ["geometry-type"], "Polygon"], ["==", ["geometry-type"], "LineString"]], paint: { "line-color": "#0f172a", "line-width": 2, "line-dasharray": [2, 2] } });
+          map.addLayer({ id: "draft-pts", type: "circle", source: "draft", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 4.5, "circle-color": "#ffffff", "circle-stroke-color": "#0f172a", "circle-stroke-width": 2 } });
+        }
+      };
+      map.on("style.load", install);
+      map.on("load", () => {
+        install(); pushSources(); loadedRef.current = true; setReady(true);
+        if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
+      });
+
+      // Hotspot popup
+      map.on("mouseenter", "hotspots", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", "hotspots", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; });
+      map.on("click", "hotspots", (e: MapLayerMouseEvent) => {
+        if (toolRef.current !== "none" || !map || !e.features?.length) return;
+        const f = e.features[0];
+        const p = f.properties as { frp: number; sensor: string; date: string };
+        const [lng, lat] = (f.geometry as unknown as { coordinates: [number, number] }).coordinates;
+        new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
+          .setLngLat([lng, lat])
+          .setHTML(`<table><tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr><tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
+          .addTo(map);
+      });
+
+      // Polygon tool
+      map.on("click", (e) => {
+        if (toolRef.current !== "poly" || !map) return;
+        const pts = polyPts.current;
+        if (pts.length >= 3) {
+          const first = map.project(pts[0]);
+          if (Math.hypot(first.x - e.point.x, first.y - e.point.y) < 12) { finalizeRef.current(pts, false); return; }
+        }
+        pts.push([e.lngLat.lng, e.lngLat.lat]);
+        setPolyN(pts.length);
+        draftRef.current = draftPoly(pts);
+        pushSources();
+      });
+      map.on("dblclick", (e) => {
+        if (toolRef.current !== "poly") return;
+        e.preventDefault();
+        const pts = polyPts.current.filter((p, i, a) => i === 0 || Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) > 1e-6);
+        finalizeRef.current(pts, false);
+      });
+      map.on("mousemove", (e) => {
+        if (toolRef.current !== "poly" || !polyPts.current.length) return;
+        draftRef.current = draftPoly(polyPts.current, [e.lngLat.lng, e.lngLat.lat]);
+        pushSources();
+      });
+
+      // Box tool
+      const el = map.getCanvasContainer();
+      let start: { x: number; y: number; ll: [number, number] } | null = null;
+      const local = (ev: PointerEvent) => { const r = el.getBoundingClientRect(); return { x: ev.clientX - r.left, y: ev.clientY - r.top }; };
+      el.addEventListener("pointerdown", (ev) => {
+        if (toolRef.current !== "box" || !map) return;
+        const p = local(ev);
+        const ll = map.unproject([p.x, p.y]);
+        start = { x: p.x, y: p.y, ll: [ll.lng, ll.lat] };
+        el.setPointerCapture(ev.pointerId);
+      });
+      el.addEventListener("pointermove", (ev) => {
+        if (!start || !map) return;
+        const p = local(ev);
+        const ll = map.unproject([p.x, p.y]);
+        draftRef.current = draftBox(start.ll, [ll.lng, ll.lat]);
+        pushSources();
+      });
+      el.addEventListener("pointerup", (ev) => {
+        if (!start || !map) return;
+        const p = local(ev);
+        const s = start;
+        start = null;
+        if (Math.hypot(p.x - s.x, p.y - s.y) < 8) { draftRef.current = EMPTY_FC; pushSources(); return; }
+        const ll = map.unproject([p.x, p.y]);
+        const b = rectRing([Math.min(s.ll[1], ll.lat), Math.max(s.ll[1], ll.lat), Math.min(s.ll[0], ll.lng), Math.max(s.ll[0], ll.lng)]);
+        finalizeRef.current(b.slice(0, 4), true);
+      });
+    })();
+    return () => { cancelled = true; map?.remove(); mapRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tool side effects
+  useEffect(() => {
+    const m = mapRef.current;
+    if (m) {
+      m.getCanvas().style.cursor = tool === "none" ? "" : "crosshair";
+      if (tool === "box") m.dragPan.disable(); else m.dragPan.enable();
+      if (tool === "poly") m.doubleClickZoom.disable(); else m.doubleClickZoom.enable();
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { polyPts.current = []; setPolyN(0); setDraft(EMPTY_FC); setTool("none"); }
+      if (e.key === "Enter" && toolRef.current === "poly") finishPoly();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, ready]);
+
+  // Esc closes the split view
+  useEffect(() => {
+    if (!split) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setSplit(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [split]);
+
+  // Data → map
+  useEffect(() => { hotRef.current = hotspots; pushSources(); }, [hotspots, ready, pushSources]);
+  useEffect(() => { pushSources(); }, [selection, ready, pushSources]);
+
+  const stepDate = (d: number) => {
+    let i = date.y * 12 + date.m + d;
+    const min = Y0 * 12 + FIRST_MONTH_Y0, max = Y1 * 12 + LAST_MONTH_Y1;
+    i = clamp(i, min, max);
+    setDate({ y: Math.floor(i / 12), m: i % 12 });
+  };
+
+  /* ── Trend chart geometry ── */
+  const W = 340, H = 112, ml = 30, mr = 4, mt = 6, mb = 16;
+  const pw = W - ml - mr, ph = H - mt - mb;
+  const seriesMax = Math.max(...rawAnnual.map((p) => p.value ?? 0), ...harmAnnual.map((p) => p.value ?? 0), 1);
+  const ticks = niceTicks(seriesMax * 1.05);
+  const yMax = ticks[ticks.length - 1];
+  const xAt = (i: number) => ml + (i / (NY - 1)) * pw;
+  const yAt = (v: number) => mt + ph - (v / yMax) * ph;
+  const pathOf = (s: (number | null)[]) => {
+    let d = "", pen = false;
+    s.forEach((v, i) => {
+      if (v === null) { pen = false; return; }
+      d += `${pen ? "L" : "M"}${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`;
+      pen = true;
+    });
+    return d;
+  };
+  const rawLine = rawAnnual.map((p) => p.value);
+  const harmLine = harmAnnual.map((p) => p.value);
+  const onChartMove = (e: React.MouseEvent<SVGRectElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setHoverYear(clamp(Math.round(((e.clientX - r.left) / r.width) * (NY - 1)), 0, NY - 1));
+  };
+
+  /* ── Heatmap tooltip data ── */
+  const tipCell = tip ? data[tip.yi][tip.m] : null;
+  const tipStats = tipCell ? { count: cellStats(tipCell, mode, "count", "all"), frp: cellStats(tipCell, mode, "frp", "all") } : null;
+  const sensorText = (c: Cell, s: { modis: number; viirs: number }) =>
+    !c.hasV ? "MODIS only" : `MODIS ${Math.round((s.modis / (s.modis + s.viirs || 1)) * 100)}% / VIIRS ${Math.round((s.viirs / (s.modis + s.viirs || 1)) * 100)}%`;
+
+  /* ── Calendar (year × month heatmap), shared by the panel and the split view ── */
+  const renderCalendar = (large: boolean) => (
+    <div className={"hd-heat" + (large ? " lg" : "")} onMouseLeave={() => setTip(null)}>
+      <div />
+      {MONTHS.map((m) => <div key={m} className="hd-heat-col">{m[0]}</div>)}
+      {vals.map((row, yi) => (
+        <React.Fragment key={yi}>
+          <div className="hd-heat-row">{large || yi % 2 === 0 ? Y0 + yi : ""}</div>
+          {row.map((c, m) => {
+            const bg = !c ? undefined : c.total < heatMax * 0.015 ? "#e8edf3" : heatColor(Math.pow(c.total / heatMax, 0.62));
+            const sel = date.y === Y0 + yi && date.m === m;
+            return (
+              <div
+                key={m}
+                className={"hd-cell" + (c ? "" : " empty") + (sel ? " sel" : "")}
+                style={{ background: bg }}
+                onMouseMove={(e) => setTip({ x: e.clientX, y: e.clientY, yi, m })}
+                onClick={() => c && setDate({ y: Y0 + yi, m })}
+                aria-label={c ? `${MONTHS[m]} ${Y0 + yi}: ${fmtInt(c.total)} ${unit(metric)}` : `${MONTHS[m]} ${Y0 + yi}: no data`}
+              />
+            );
+          })}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+
+  const bb = region.bbox;
+  const sgn = (v: number) => (v >= 0 ? "+" : "−");
+  void bb; void sgn; // used in future geo display
+
+  return (
+    <div className="hd-root">
+      <style dangerouslySetInnerHTML={{ __html: CSS }} />
+      <div ref={containerRef} className="hd-map" />
+
+      {/* Toolbar */}
+      <div className="hd-toolbar">
+        <span className="hd-word">Vigil</span>
+        <div className="hd-group">
+          <button className={"hd-btn" + (tool === "box" ? " on" : "")} onClick={() => pickTool("box")}>Box</button>
+          <button className={"hd-btn" + (tool === "poly" ? " on" : "")} onClick={() => pickTool("poly")}>Polygon</button>
+          {tool === "poly" && polyN >= 3 && <button className="hd-btn accent" onClick={finishPoly}>Finish</button>}
+          {selection && <button className="hd-btn" onClick={clearSelection}>Clear</button>}
+        </div>
+      </div>
+
+      {tool !== "none" && (
+        <div className="hd-hintbar">
+          {tool === "box" ? "Drag on the map" : polyN < 3 ? `Click to add vertices (${polyN})` : "Click first vertex, double-click, or Enter to close"}
+          <span>Esc to cancel</span>
+        </div>
+      )}
+
+      {/* Date + legend */}
+      <div className="hd-datechip">
+        <div className="hd-date-row">
+          <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
+          <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
+          <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
+          <span className="hd-mono">{fmtInt(hotspots.features.length)} hotspots</span>
+          {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
+        </div>
+        <div className="hd-frp-legend">
+          <span>FRP MW</span>
+          {[["#fbbf24", "<15"], ["#f97316", "15–40"], ["#ea580c", "40–90"], ["#dc2626", "≥90"]].map(([c, t]) => (
+            <span key={t}><i style={{ background: c }} />{t}</span>
+          ))}
+        </div>
+      </div>
+
+      {/* Left panel: Region card */}
+      {selection && (
+        <aside className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed")} aria-label="Region settings">
+          <div className="hd-panel-head">
+            <span className="hd-mono hd-name">{selectionName}</span>
+            <button className="hd-icon" onClick={() => setPanelLeftOpen(!panelLeftOpen)} aria-label={panelLeftOpen ? "Collapse region panel" : "Expand region panel"} aria-expanded={panelLeftOpen}>
+              <svg width="12" height="12" viewBox="0 0 14 14"><path d={panelLeftOpen ? "M2 5l5 5 5-5" : "M2 9l5-5 5 5"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" /></svg>
+            </button>
+          </div>
+          {panelLeftOpen && (
+            <div className="hd-panel-body">
+              <RegionCard
+                selection={selection}
+                name={selectionName}
+                onRename={setSelectionName}
+                range={selRange}
+                onRangeChange={setSelRange}
+                onApplyBbox={handleApplyBbox}
+              />
+            </div>
+          )}
+        </aside>
+      )}
+
+      {/* Analytics panel */}
+      {selection && (
+        <aside className={"hd-panel" + (panelOpen ? "" : " collapsed")} aria-label="Analytics">
+          <div className="hd-panel-head">
+            <div className="hd-head-actions">
+              <button className="hd-icon" onClick={() => setSplit(true)} aria-label="Deep dive: calendar full screen" title="Deep dive">
+                <ExpandIcon />
+              </button>
+              <button className="hd-icon" onClick={() => setPanelOpen(!panelOpen)} aria-label={panelOpen ? "Collapse panel" : "Expand panel"} aria-expanded={panelOpen}>
+              <svg width="12" height="12" viewBox="0 0 14 14"><path d={panelOpen ? "M2 5l5 5 5-5" : "M2 9l5-5 5 5"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" /></svg>
+              </button>
+            </div>
+          </div>
+
+          {panelOpen && (
+            <div className="hd-panel-body">
+              <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw" }, { v: "harm", t: "Harmonized 1km" }]} />
+
+              {renderCalendar(false)}
+
+              <div className="hd-chart-wrap">
+                <svg viewBox={`0 0 ${W} ${H}`} className="hd-chart" role="img" aria-label="Annual series, raw versus harmonized">
+                  {ticks.map((t) => (
+                    <g key={t}>
+                      <line x1={ml} x2={W - mr} y1={yAt(t)} y2={yAt(t)} stroke="#e2e8f0" />
+                      <text x={ml - 6} y={yAt(t) + 3.5} textAnchor="end" className="hd-axis">{fmtCompact(t)}</text>
+                    </g>
+                  ))}
+                  {[2000, 2005, 2010, 2015, 2020, 2025].map((y) => <text key={y} x={xAt(y - Y0)} y={H - 3} textAnchor="middle" className="hd-axis">{y}</text>)}
+                  <line x1={xAt(2012 - Y0)} x2={xAt(2012 - Y0)} y1={mt} y2={mt + ph} stroke="#dc2626" strokeDasharray="3 3" opacity={0.6} />
+                  <text x={xAt(2012 - Y0) - 4} y={mt + 8} textAnchor="end" className="hd-annot">2012</text>
+                  <path d={pathOf(rawLine)} fill="none" stroke="#dc2626" strokeWidth={mode === "raw" ? 2.4 : 1.4} strokeDasharray="5 3" opacity={mode === "raw" ? 1 : 0.4} strokeLinejoin="round" />
+                  <path d={pathOf(harmLine)} fill="none" stroke="#ea580c" strokeWidth={mode === "harm" ? 2.4 : 1.4} opacity={mode === "harm" ? 1 : 0.45} strokeLinejoin="round" />
+                  {hoverYear !== null && (
+                    <g>
+                      <line x1={xAt(hoverYear)} x2={xAt(hoverYear)} y1={mt} y2={mt + ph} stroke="#0f172a" opacity={0.25} />
+                      {rawLine[hoverYear] != null && <circle cx={xAt(hoverYear)} cy={yAt(rawLine[hoverYear]!)} r={3.5} fill="#dc2626" stroke="#fff" strokeWidth={1.2} />}
+                      {harmLine[hoverYear] != null && <circle cx={xAt(hoverYear)} cy={yAt(harmLine[hoverYear]!)} r={3.5} fill="#ea580c" stroke="#fff" strokeWidth={1.2} />}
+                    </g>
+                  )}
+                  <rect x={ml} y={mt} width={pw} height={ph} fill="transparent" onMouseMove={onChartMove} onMouseLeave={() => setHoverYear(null)} />
+                </svg>
+                <div className="hd-chart-legend">
+                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#dc2626" strokeWidth="2.4" strokeDasharray="4 3" /></svg>Raw</span>
+                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>Harmonized</span>
+                  {hoverYear !== null && (
+                    <span className="hd-mono hd-hover-read">
+                      {Y0 + hoverYear}: {rawLine[hoverYear] != null ? fmtCompact(rawLine[hoverYear]!) : "—"} / {harmLine[hoverYear] != null ? fmtCompact(harmLine[hoverYear]!) : "—"} {unit(metric)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </aside>
+      )}
+
+      {/* Deep dive: full-screen calendar */}
+      {split && selection && (
+        <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
+          <div className="hd-split-head">
+            <span className="hd-word-sm">Vigil</span>
+            <span className="hd-mono hd-name">{region.name}</span>
+            <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw" }, { v: "harm", t: "Harmonized 1km" }]} />
+            <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
+              <CollapseIcon />
+            </button>
+          </div>
+          <div className="hd-split-body">
+            <section className="hd-split-pane" aria-label="Calendar">
+              <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span></div>
+              <div className="hd-split-cal">{renderCalendar(true)}</div>
+            </section>
+          </div>
+        </div>
+      )}
+
+      {/* Heatmap tooltip */}
+      {tip && selection && (panelOpen || split) && (
+        <div className="hd-tip" style={{ left: Math.max(8, tip.x - 250), top: Math.max(8, tip.y - 12), transform: "translateY(-100%)" }}>
+          <div className="hd-tip-title">{Y0 + tip.yi}-{String(tip.m + 1).padStart(2, "0")}</div>
+          {tipCell && tipStats ? (
+            <>
+              <div className="hd-tip-r"><span>Fire count</span><b>{fmtInt(tipStats.count.total)}</b></div>
+              <div className="hd-tip-r"><span>FRP</span><b>{fmtInt(tipStats.frp.total)} MW</b></div>
+              <div className="hd-tip-r"><span>Sensor origin</span><b>{sensorText(tipCell, tipStats.count)}</b></div>
+              <div className="hd-tip-r dim"><span>MODIS</span><b>{fmtInt(tipStats.count.modis)}</b></div>
+              <div className="hd-tip-r dim"><span>VIIRS</span><b>{tipCell.hasV ? fmtInt(tipStats.count.viirs) : "—"}</b></div>
+            </>
+          ) : (
+            <div className="hd-tip-r"><span>No data</span></div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Styles                                                                     */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const CSS = `
+.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#0f172a;--mut:#64748b;--or:#ea580c;--cr:#dc2626;--gr:#16a34a;
+  position:fixed;inset:0;overflow:hidden;background:var(--bg2);color:var(--tx);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;color-scheme:light}
+.hd-root *{box-sizing:border-box}
+.hd-root h2,.hd-root h3,.hd-root p{margin:0}
+.hd-root button{font:inherit;color:inherit;cursor:pointer}
+.hd-root button:focus-visible{outline:2px solid var(--or);outline-offset:2px}
+.hd-map{position:absolute;inset:0}
+.hd-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-variant-numeric:tabular-nums}
+
+.hd-toolbar{position:absolute;top:12px;left:12px;right:60px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;pointer-events:none;z-index:5}
+.hd-toolbar>*{pointer-events:auto;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;box-shadow:0 2px 12px rgba(15,23,42,.12)}
+.hd-word{padding:7px 12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
+.hd-group{display:flex;gap:2px;padding:3px}
+.hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#334155;white-space:nowrap}
+.hd-btn:hover{background:var(--bg2)}
+.hd-btn.on{background:var(--tx);color:#fff}
+.hd-btn.accent{background:var(--or);color:#fff}
+.hd-seg{display:inline-flex;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:2px;gap:2px}
+.hd-toolbar .hd-seg{border:0;padding:3px;border-radius:8px}
+.hd-seg button{border:0;background:transparent;padding:5px 11px;border-radius:7px;font-weight:550;color:var(--mut);white-space:nowrap}
+.hd-seg button:hover{color:var(--tx)}
+.hd-seg button.on{background:var(--tx);color:#fff}
+
+.hd-hintbar{position:absolute;top:62px;left:50%;transform:translateX(-50%);z-index:5;background:var(--tx);color:#fff;border-radius:999px;padding:6px 14px;display:flex;gap:14px;font-size:12px}
+.hd-hintbar span{color:#94a3b8}
+
+.hd-datechip{position:absolute;left:12px;bottom:28px;z-index:5;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;padding:7px 10px;box-shadow:0 2px 12px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:6px}
+.hd-date-row{display:flex;align-items:center;gap:8px}
+.hd-date-row button{border:0;background:rgba(15,23,42,.06);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
+.hd-date-row button:hover{background:var(--bg2)}
+.hd-date-row .hd-link{width:auto;border:0;background:none;color:var(--or);font-weight:600;font-size:12px;padding:0 2px;height:auto}
+.hd-frp-legend{display:flex;gap:10px;color:var(--mut);font-size:11px;align-items:center}
+.hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
+.hd-frp-legend i{width:9px;height:9px;border-radius:50%}
+
+.hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
+  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-panel-left{position:absolute;left:12px;top:70px;bottom:100px;z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
+  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 14px;display:flex;flex-direction:column;gap:0}
+.hd-panel-left .hd-region-card{border-bottom:0}
+.hd-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
+.hd-name{font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
+.hd-icon{border:0;background:transparent;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;padding:0;color:var(--tx)}
+.hd-icon:hover{background:rgba(15,23,42,.07)}
+.hd-panel-body{overflow:auto;padding:4px 0 14px;display:flex;flex-direction:column;gap:12px}
+.hd-panel-body .hd-seg{display:flex;background:rgba(15,23,42,.06);border:0;border-radius:7px;margin:0 14px}
+.hd-panel-body .hd-seg button{flex:1;padding:5px 8px;font-size:12px;border-radius:5px}
+.hd-panel-body .hd-heat{margin:0 14px}
+.hd-panel-body .hd-chart-wrap{margin:0 14px}
+
+.hd-heat{display:grid;grid-template-columns:26px repeat(12,minmax(0,1fr));gap:1px;user-select:none}
+.hd-heat-col{font-size:9px;color:var(--mut);text-align:center;line-height:1.2}
+.hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
+.hd-cell{height:8px;border-radius:1px;cursor:pointer}
+.hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
+.hd-cell.sel{outline:1.5px solid var(--tx);outline-offset:0;position:relative;z-index:1}
+.hd-cell:hover{outline:1px solid var(--tx);outline-offset:0;position:relative;z-index:1}
+
+.hd-chart-wrap{position:relative}
+.hd-chart{width:100%;height:auto;display:block}
+.hd-axis{font-size:9px;fill:#64748b;font-variant-numeric:tabular-nums}
+.hd-annot{font-size:9px;fill:#b91c1c;font-weight:600}
+.hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#334155;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
+.hd-chart-legend span{display:inline-flex;align-items:center;gap:5px}
+.hd-hover-read{margin-left:auto;color:var(--tx)}
+
+.hd-head-actions{display:flex;gap:2px;margin-left:auto}
+.hd-sec-head{display:flex;justify-content:space-between;align-items:center;margin:-2px 0 -6px}
+.hd-sec-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
+
+.hd-split{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;background:var(--bg2)}
+.hd-split-head{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--bd)}
+.hd-word-sm{font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
+.hd-split-head .hd-seg{margin-left:auto}
+.hd-split-body{flex:1;min-height:0;display:flex;padding:12px}
+.hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
+.hd-split-pane .hd-sec-head{margin:0}
+.hd-split-cal{flex:1;min-height:0;display:flex}
+.hd-split-cal .hd-heat{flex:1}
+.hd-heat.lg{grid-template-columns:34px repeat(12,minmax(0,1fr));grid-auto-rows:1fr;grid-template-rows:auto;gap:2px}
+.hd-heat.lg .hd-cell{height:auto;min-height:6px;border-radius:2px}
+.hd-heat.lg .hd-heat-col,.hd-heat.lg .hd-heat-row{font-size:11px}
+
+.hd-tip{position:fixed;z-index:50;width:230px;background:rgba(15,23,42,.94);color:#f8fafc;border-radius:8px;padding:9px 11px;box-shadow:0 8px 24px rgba(15,23,42,.16);pointer-events:none;font-size:12px}
+.hd-tip-title{font-weight:700;margin-bottom:4px;font-family:ui-monospace,Menlo,monospace}
+.hd-tip-r{display:flex;justify-content:space-between;gap:10px;padding:1px 0}
+.hd-tip-r span{color:#94a3b8}
+.hd-tip-r b{font-weight:650;font-variant-numeric:tabular-nums;text-align:right}
+.hd-tip-r.dim{font-size:11px}
+
+.hd-popup .maplibregl-popup-content{border-radius:10px;border:1px solid var(--bd);padding:8px 10px;font-size:12px;box-shadow:0 8px 24px rgba(15,23,42,.18);color:var(--tx)}
+.hd-popup table{border-collapse:collapse}
+.hd-popup td{padding:1px 0}
+.hd-popup td:first-child{color:var(--mut);padding-right:14px}
+.hd-popup td:last-child{font-weight:650;font-variant-numeric:tabular-nums}
+.maplibregl-ctrl-top-right{top:6px}
+.maplibregl-ctrl-bottom-right{bottom:0}
+
+/* ── Region Card ── */
+.hd-region-card{display:flex;flex-direction:column;gap:10px;padding:10px 14px 12px;border-bottom:1px solid var(--bd)}
+.hd-rc-titlerow{display:flex;align-items:center;gap:8px;min-height:26px}
+.hd-rc-nameinput{flex:1;background:transparent;border:1px solid var(--or);border-radius:5px;padding:3px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--tx);outline:none;min-width:0}
+.hd-rc-rename{margin-left:auto;border:0;background:transparent;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--mut);padding:3px 7px;border-radius:5px;white-space:nowrap;flex-shrink:0}
+.hd-rc-rename:hover{background:rgba(15,23,42,.07);color:var(--tx)}
+.hd-rc-section{display:flex;flex-direction:column;gap:6px}
+.hd-rc-seclabel{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.hd-rc-grid4{display:grid;grid-template-columns:1fr 1fr;gap:5px 10px}
+.hd-rc-field{display:flex;flex-direction:column;gap:2px}
+.hd-rc-fieldlabel{font-size:10px;color:var(--mut)}
+.hd-rc-fieldinput{background:var(--bg2);border:1px solid var(--bd);border-radius:5px;padding:4px 7px;font:inherit;font-size:12px;color:var(--tx);outline:none;width:100%}
+.hd-rc-fieldinput:focus{border-color:var(--or)}
+.hd-rc-fieldinput.err{border-color:var(--cr)}
+.hd-rc-monthinput{background:var(--bg2);border:1px solid var(--bd);border-radius:5px;padding:4px 7px;font:inherit;font-size:12px;color:var(--tx);outline:none;width:100%}
+.hd-rc-monthinput:focus{border-color:var(--or)}
+.hd-rc-fielderr{font-size:10px;color:var(--cr);line-height:1.3}
+.hd-rc-apply{align-self:flex-end;border:1px solid var(--bd);background:var(--bg2);border-radius:6px;padding:4px 14px;font-size:12px;font-weight:600;color:var(--tx)}
+.hd-rc-apply:not(:disabled):hover{background:var(--tx);color:#fff;border-color:var(--tx)}
+.hd-rc-apply:disabled{opacity:.4;cursor:default}
+.hd-rc-rangerow{display:flex;gap:10px}
+.hd-rc-rangerow .hd-rc-field{flex:1}
+.hd-rc-note{font-size:10.5px;color:var(--mut);font-style:italic}
+.hd-analysis-slot{background:rgba(15,23,42,.03);border:1px solid var(--bd);border-radius:7px;padding:9px 11px;display:flex;flex-direction:column;gap:3px}
+.hd-analysis-title{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.hd-analysis-soon{font-size:11px;color:var(--mut);font-style:italic}
+.hd-rc-export{width:100%;background:var(--or);color:#fff;border:0;border-radius:7px;padding:9px;font-weight:650;font-size:13px}
+.hd-rc-export:hover{background:#c2410c}
+.hd-rc-simnote{font-size:10px;color:var(--mut);text-align:center;margin:4px 0 0;font-style:italic}
+
+@media (max-width:900px){
+  .hd-panel{right:8px;left:8px;width:auto;bottom:8px;max-height:50vh}
+  .hd-panel-left{left:8px;right:8px;width:auto;top:auto;bottom:calc(50vh + 24px);max-height:36vh}
+  .hd-datechip{display:none}
+  .hd-toolbar{right:50px}
+}
+@media (prefers-reduced-motion:reduce){.hd-root *{transition:none!important}}
+`;
