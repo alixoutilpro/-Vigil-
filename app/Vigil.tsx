@@ -277,7 +277,7 @@ interface HexFeature {
 type HexCollection = { type: "FeatureCollection"; features: HexFeature[] };
 
 /** Display resolution by zoom: the mesh stays visible at every scale (res-5 children summed into their parent: exact). */
-const resPourZoom = (z: number) => (z < 3.3 ? 3 : z < 5 ? 4 : 5);
+const resPourZoom = (z: number) => (z < 1.6 ? 3 : z < 3.6 ? 4 : 5);
 const TAILLE_RES: Record<number, string> = { 3: "~110 km", 4: "~42 km", 5: "~17 km" };
 const AIRE = new Map<string, number>();
 const aireKm2 = (h: string) => { let a = AIRE.get(h); if (a === undefined) AIRE.set(h, (a = cellArea(h, "km2"))); return a; };
@@ -400,19 +400,34 @@ function heatMaxOf(mois: (MoisZone | null)[], metrique: Metrique): number {
 const heatT = (x: number, max: number) => (x <= 0 ? 0 : Math.log1p(x) / Math.log1p(Math.max(max, 1)));
 
 /**
- * Map fill colour: density per 1,000 km² per month, FIXED log-spaced classes (same at every zoom and month, so
- * seasons, years and regions compare). 9-class ColorBrewer YlOrRd: sequential, colour-blind safe, never red–green.
- * Breaks chosen from the measured distribution (res 3 to 5, 36 random months: median 0.4 to 8, P99 70 to 190).
+ * Map fill colour: density per 1,000 km² per month in 12 EQUAL-FREQUENCY classes (each colour = 1/12 of the active
+ * hexagon-months of 2002-07 → 2026-10), one set of breaks per displayed H3 resolution. Breaks are fixed in time,
+ * so months, seasons and years stay comparable, and dense where the data are, so neighbouring territories separate.
+ * Computed on 13.5 M res-5 hexagon-months (and their res-4 / res-3 parents), partial month excluded.
+ * 12 shades from very light yellow to very dark red: sequential, monotone lightness, colour-blind safe.
  */
-const HEX_COLORS = ["#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a", "#e31a1c", "#bd0026", "#800026"];
-const DENS_BREAKS: Record<Metrique, number[]> = {
-  hotspots: [0.1, 0.3, 1, 3, 10, 30, 100, 300],
-  frp: [3, 10, 30, 100, 300, 1000, 3000, 10000],
+const HEX_COLORS = ["#ffffd4", "#fff3a8", "#ffe680", "#ffd45c", "#ffbd45", "#fea03a", "#fd8132", "#f5602a", "#e44022", "#c9261b", "#a11416", "#6e0a10"];
+const DENS_BREAKS: Record<Metrique, Record<number, number[]>> = {
+  hotspots: {
+    3: [0.0323, 0.0751, 0.0988, 0.162, 0.244, 0.374, 0.581, 0.953, 1.7, 3.5, 9.84],
+    4: [0.124, 0.364, 0.528, 0.629, 1.02, 1.43, 2.07, 3.19, 5.3, 9.97, 23.8],
+    5: [0.724, 1.57, 3.35, 3.79, 4.45, 6.93, 9.06, 13.2, 19.4, 31.2, 59.5],
+  },
+  frp: {
+    3: [0.408, 0.865, 1.58, 2.75, 4.73, 8.13, 14.4, 26.8, 54.6, 129, 414],
+    4: [1.73, 4.07, 6.77, 11, 17.7, 29.1, 49.3, 87.3, 166, 356, 975],
+    5: [9.65, 23.5, 38.2, 58.3, 88.8, 136, 214, 347, 590, 1100, 2480],
+  },
 };
-function hexColorExpr(metrique: Metrique): unknown {
+function hexColorExpr(metrique: Metrique, res: number): unknown {
   const stops: unknown[] = [];
-  DENS_BREAKS[metrique].forEach((v, i) => stops.push(v, HEX_COLORS[i + 1]));
+  DENS_BREAKS[metrique][res].forEach((v, i) => stops.push(v, HEX_COLORS[i + 1]));
   return ["step", ["get", "c"], HEX_COLORS[0], ...stops];
+}
+/** Lowest class fades (sparse detections), every other class is drawn opaque enough to read the gradient. */
+function hexOpacityExpr(metrique: Metrique, res: number): unknown {
+  const b0 = DENS_BREAKS[metrique][res][0];
+  return ["interpolate", ["linear"], ["zoom"], 2, ["case", ["<", ["get", "c"], b0], 0.4, 0.9], 9, ["case", ["<", ["get", "c"], b0], 0.35, 0.75]];
 }
 
 interface AnnualPt {
@@ -1167,9 +1182,10 @@ export default function Vigil() {
   colorRef.current = () => {
     const m = mapRef.current;
     if (!m?.getLayer("hex")) return;
-    m.setPaintProperty("hex", "fill-color", hexColorExpr(metrique) as never);
+    m.setPaintProperty("hex", "fill-color", hexColorExpr(metrique, resCarte) as never);
+    m.setPaintProperty("hex", "fill-opacity", hexOpacityExpr(metrique, resCarte) as never);
   };
-  useEffect(() => { colorRef.current(); }, [metrique, ready]);
+  useEffect(() => { colorRef.current(); }, [metrique, resCarte, ready]);
 
 
   // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
@@ -1547,11 +1563,15 @@ export default function Vigil() {
         {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
         <div className="hd-frp-legend">
           <span>{metrique === "hotspots" ? "Hotspots" : "FRP (MW)"} / 1,000 km² / month · H3 res {resCarte} ({TAILLE_RES[resCarte]})</span>
-          <span className="hd-ramp-lbl">{`<${fmtCompact(DENS_BREAKS[metrique][0])}`}</span>
+          <span className="hd-ramp-lbl">{`<${fmtVal(DENS_BREAKS[metrique][resCarte][0])}`}</span>
           <span className="hd-ramp">
-            {HEX_COLORS.map((c, i) => <i key={c} style={{ background: c }} title={i === 0 ? `< ${DENS_BREAKS[metrique][0]}` : `≥ ${DENS_BREAKS[metrique][i - 1]}`} />)}
+            {HEX_COLORS.map((c, i) => {
+              const b = DENS_BREAKS[metrique][resCarte];
+              return <i key={c} style={{ background: c }} title={i === 0 ? `< ${b[0]}` : i === b.length ? `≥ ${b[i - 1]}` : `${b[i - 1]} – ${b[i]}`} />;
+            })}
           </span>
-          <span className="hd-ramp-lbl">{`≥${fmtCompact(DENS_BREAKS[metrique][DENS_BREAKS[metrique].length - 1])}`}</span>
+          <span className="hd-ramp-lbl">{`≥${fmtVal(DENS_BREAKS[metrique][resCarte][DENS_BREAKS[metrique][resCarte].length - 1])}`}</span>
+          <span className="hd-ramp-note">12 equal-frequency classes (2002–2026)</span>
         </div>
       </div>
 
@@ -1912,7 +1932,8 @@ const CSS = `
 /* ── Map legend ramp ── */
 .hd-frp-legend{flex-wrap:wrap}
 .hd-ramp{display:inline-flex!important;gap:0!important}
-.hd-ramp i{width:16px!important;height:10px!important;border-radius:0!important;display:inline-block}
+.hd-ramp i{width:13px!important;height:10px!important;border-radius:0!important;display:inline-block}
+.hd-ramp-note{width:100%;font-size:10px;color:var(--mut)}
 .hd-ramp-lbl{font-variant-numeric:tabular-nums}
 /* ── E7 block and PNG button ── */
 .hd-median{margin:0 14px;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.6);display:flex;flex-direction:column;gap:3px;font-size:12px}
