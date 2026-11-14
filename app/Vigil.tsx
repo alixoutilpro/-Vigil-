@@ -12,6 +12,12 @@ import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useSt
 import "maplibre-gl/dist/maplibre-gl.css";
 import contractData from "../data/data.json";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
+import { polygonToCells, latLngToCell, gridDisk } from "h3-js";
+import {
+  ResponsiveContainer, ComposedChart, ScatterChart,
+  Bar, Line, Scatter,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine, Cell,
+} from "recharts";
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Types & constants                                                          */
@@ -84,6 +90,7 @@ interface CellVal {
   modis: number;
   viirs: number;
 }
+type MonthRecord = { y: number; m: number; tmax: number; precip: number; rh: number; wind: number };
 
 interface DateRange {
   from: { y: number; m: number };
@@ -102,6 +109,9 @@ const SWITCH = { y: 2020, m: 10 }; // Nov 2020
 const BASE_Y0 = 2003, BASE_Y1 = 2025;
 const isViirsMonth = (y: number, m: number) => y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
 const isConvertedMonth = (y: number, m: number) => y > SWITCH.y || (y === SWITCH.y && m >= SWITCH.m);
+const H3_RES = 5; // H3 resolution 5 ≈ 253 km² (same grid as the backend export)
+/** Reference years of the deep-dive medians: same fixed base as E7 and the backend (2003-2025). */
+const KPI_REF_START = BASE_Y0;
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -464,6 +474,7 @@ function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
   return acc.map((row, yi) =>
     row.map((a, m): Cell | null => {
       const y = Y0 + yi;
+      // data.json rows are already MONTHLY totals (iso_week = week of the 15th): never rescale them by weeks.
       if (y < first.y || (y === first.y && m < first.m) || y > last.y || (y === last.y && m > last.m)) return null;
       const hasV = isViirsMonth(y, m);
       return {
@@ -1016,6 +1027,36 @@ function CollapseIcon() {
   );
 }
 
+function monthMedian(vs: (CellVal | null)[][], calM: number, y0: number, y1: number): number {
+  const ns: number[] = [];
+  for (let y = y0; y <= y1; y++) { const c = vs[y - Y0]?.[calM]; if (c) ns.push(c.total); }
+  if (!ns.length) return 0;
+  ns.sort((a, b) => a - b);
+  const mid = Math.floor(ns.length / 2);
+  return ns.length % 2 === 0 ? (ns[mid - 1] + ns[mid]) / 2 : ns[mid];
+}
+
+function spearman(xs: number[], ys: number[]): number {
+  const n = xs.length;
+  if (n < 3) return NaN;
+  const rnk = (arr: number[]) => {
+    const sorted = arr.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+    const r = new Array<number>(n);
+    sorted.forEach((e, ri) => { r[e.i] = ri + 1; });
+    return r;
+  };
+  const rx = rnk(xs), ry = rnk(ys);
+  const mean = (n + 1) / 2;
+  let cov = 0, vx = 0, vy = 0;
+  for (let i = 0; i < n; i++) {
+    cov += (rx[i] - mean) * (ry[i] - mean);
+    vx += (rx[i] - mean) ** 2;
+    vy += (ry[i] - mean) ** 2;
+  }
+  return vx && vy ? cov / Math.sqrt(vx * vy) : NaN;
+}
+
+
 /** Drag a floating panel by its header. Offset is applied as a CSS transform; the header stays on screen. */
 function useDrag() {
   const ref = useRef<HTMLElement>(null);
@@ -1074,6 +1115,9 @@ export default function Vigil() {
   const [hoverYear, setHoverYear] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [wxData, setWxData] = useState<Record<string, MonthRecord[]> | null>(null);
+  const [wxStatus, setWxStatus] = useState<"idle" | "loading" | "ok" | "unavailable">("idle");
+  const [wxError, setWxError] = useState<string | null>(null);
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
 
@@ -1106,6 +1150,134 @@ export default function Vigil() {
   const heatMax = useMemo(() => absoluteHeatMax(mode), [mode]);
   const annual = mode === "raw" ? rawAnnual : harmAnnual;
   const stripes = useMemo(() => stripeColors(annual), [annual]);
+  const rawFrpVals = useMemo(() => monthlyValues(data, "raw", "frp", "all"), [data]);
+  const harmFrpVals = useMemo(() => monthlyValues(data, "harm", "frp", "all"), [data]);
+  const frpVals = mode === "raw" ? rawFrpVals : harmFrpVals;
+  const fwLink = useMemo<{ raw: string; harm: string } | null>(() => {
+    if (!wxData || wxStatus !== "ok") return null;
+    const allRecs = Object.values(wxData).flat();
+    if (!allRecs.length) return null;
+    const tmaxAll = allRecs.map((r) => r.tmax), precipAll = allRecs.map((r) => r.precip);
+    const [tMin, tMax] = [Math.min(...tmaxAll), Math.max(...tmaxAll)];
+    const [pMin, pMax] = [Math.min(...precipAll), Math.max(...precipAll)];
+    const nT = (v: number) => tMax > tMin ? (v - tMin) / (tMax - tMin) : 0;
+    const nP = (v: number) => pMax > pMin ? (v - pMin) / (pMax - pMin) : 0;
+    const hdByYear = new Map<number, number>();
+    for (const r of allRecs) {
+      hdByYear.set(r.y, (hdByYear.get(r.y) ?? 0) + nT(r.tmax) * Math.max(0, 1 - nP(r.precip)));
+    }
+    const ratio = (y0: number, y1: number, fv: (CellVal | null)[][]): number => {
+      let s = 0, n = 0;
+      for (let y = y0; y <= y1; y++) {
+        const fires = fv[y - Y0]?.reduce((a, c) => a + (c?.total ?? 0), 0) ?? 0;
+        const hd = hdByYear.get(y) ?? 0;
+        if (fires > 0 && hd > 0) { s += fires / hd; n++; }
+      }
+      return n ? s / n : 0;
+    };
+    const rE = ratio(2008, 2011, rawVals), rL = ratio(2013, 2016, rawVals);
+    const hE = ratio(2008, 2011, harmVals), hL = ratio(2013, 2016, harmVals);
+    if (!rE || !hE) return null;
+    return { raw: (rL / rE).toFixed(1) + "×", harm: (hL / hE).toFixed(1) + "×" };
+  }, [wxData, wxStatus, rawVals, harmVals]);
+
+  const ddData = useMemo(() => {
+    if (!split) return null;
+    const allWx = wxData ? Object.values(wxData).flat() : [];
+    const wxYM = new Map<string, { tmax: number[]; precip: number[]; rh: number[] }>();
+    for (const r of allWx) {
+      const k = `${r.y}-${r.m}`;
+      if (!wxYM.has(k)) wxYM.set(k, { tmax: [], precip: [], rh: [] });
+      const e = wxYM.get(k)!;
+      e.tmax.push(r.tmax); e.precip.push(r.precip); e.rh.push(r.rh);
+    }
+    const wmean = (y: number, m: number, f: "tmax" | "precip" | "rh") => {
+      const e = wxYM.get(`${y}-${m}`); if (!e || !e[f].length) return null;
+      return e[f].reduce((a, b) => a + b, 0) / e[f].length;
+    };
+
+    type C1Pt = { label: string; fires: number; tmax: number | null; precip: number | null };
+    const c1: C1Pt[] = [];
+    for (let y = Y0; y <= Y1; y++) {
+      for (let m = 0; m < 12; m++) {
+        if (y === Y0 && m < FIRST_MONTH_Y0) continue;
+        if (y === Y1 && m > LAST_MONTH_Y1) continue;
+        const fires = harmVals[y - Y0]?.[m]?.total;
+        if (!fires) continue;
+        c1.push({ label: `${y}-${String(m + 1).padStart(2, "0")}`, fires, tmax: wmean(y, m + 1, "tmax"), precip: wmean(y, m + 1, "precip") });
+      }
+    }
+
+    const tVals = c1.map(p => p.tmax).filter((v): v is number => v !== null);
+    const pVals = c1.map(p => p.precip).filter((v): v is number => v !== null);
+    const tMin = Math.min(...tVals), tMax = Math.max(...tVals);
+    const pMin = Math.min(...pVals), pMax = Math.max(...pVals);
+    const nT = (v: number) => tMax > tMin ? (v - tMin) / (tMax - tMin) : 0;
+    const nP = (v: number) => pMax > pMin ? (v - pMin) / (pMax - pMin) : 0;
+
+    const c3pre: { hdi: number; fires: number; label: string }[] = [];
+    const c3post: { hdi: number; fires: number; label: string }[] = [];
+    for (const pt of c1) {
+      if (pt.tmax === null || pt.precip === null) continue;
+      const hdi = nT(pt.tmax) * Math.max(0, 1 - nP(pt.precip));
+      const yr = Number(pt.label.slice(0, 4));
+      (yr < 2012 ? c3pre : c3post).push({ hdi, fires: pt.fires, label: pt.label });
+    }
+    const c3all = [...c3pre, ...c3post];
+    const spR = c3all.length >= 3 ? spearman(c3all.map(p => p.hdi), c3all.map(p => p.fires)) : NaN;
+
+    const c4map = new Map<number, { rSum: number; hSum: number; n: number }>();
+    for (let y = Y0; y <= Y1; y++) {
+      for (let m = 0; m < 12; m++) {
+        if (y === Y0 && m < FIRST_MONTH_Y0) continue;
+        if (y === Y1 && m > LAST_MONTH_Y1) continue;
+        const rf = rawVals[y - Y0]?.[m]?.total;
+        const hf = harmVals[y - Y0]?.[m]?.total;
+        const tmax = wmean(y, m + 1, "tmax");
+        const precip = wmean(y, m + 1, "precip");
+        if (!rf || !hf || tmax === null || precip === null) continue;
+        const hdi = nT(tmax) * Math.max(0, 1 - nP(precip));
+        if (hdi <= 0) continue;
+        if (!c4map.has(y)) c4map.set(y, { rSum: 0, hSum: 0, n: 0 });
+        const e = c4map.get(y)!;
+        e.rSum += rf / hdi; e.hSum += hf / hdi; e.n++;
+      }
+    }
+    const c4 = Array.from(c4map.entries()).sort(([a], [b]) => a - b)
+      .map(([year, { rSum, hSum, n }]) => ({ year, raw: rSum / n, harm: hSum / n }));
+    const avgR4 = (y0: number, y1: number, f: "raw" | "harm") => {
+      const pts = c4.filter(p => p.year >= y0 && p.year <= y1);
+      return pts.length ? pts.reduce((s, p) => s + p[f], 0) / pts.length : 0;
+    };
+    const rE4 = avgR4(2008, 2011, "raw"), rL4 = avgR4(2013, 2016, "raw");
+    const hE4 = avgR4(2008, 2011, "harm"), hL4 = avgR4(2013, 2016, "harm");
+
+    const medArr = (arr: number[]) => { const s = [...arr].sort((a, b) => a - b); const mid = Math.floor(s.length / 2); return s.length % 2 === 0 ? (s[mid-1]+s[mid])/2 : s[mid]; };
+    const c2 = MONTHS.map((name, mi) => {
+      const fv = harmVals.map(row => row[mi]?.total).filter((v): v is number => v !== undefined && v > 0);
+      const tv: number[] = [], pv: number[] = [];
+      for (let y = Y0; y <= Y1; y++) {
+        const t = wmean(y, mi + 1, "tmax"); if (t !== null) tv.push(t);
+        const p = wmean(y, mi + 1, "precip"); if (p !== null) pv.push(p);
+      }
+      return { name, fires: fv.length ? medArr(fv) : 0, tmax: tv.length ? medArr(tv) : null, precip: pv.length ? medArr(pv) : null, sel: mi === date.m };
+    });
+
+    const ddRefEnd = BASE_Y1;
+    void ddRefEnd;
+    const ddFocus = selection && monthKey(selRange.from.y, selRange.from.m) === monthKey(selRange.to.y, selRange.to.m) ? selRange.from : LATEST;
+    const mc = compareToMedian(harmVals, ddFocus.y, ddFocus.m);
+    const firesVal = mc ? mc.value : null;
+    const firesVsMed = mc && mc.median > 0 ? mc.value / mc.median : null;
+    const firesRank = mc ? mc.rank : null;
+
+    return {
+      c1, c2, c3pre, c3post, c4, spR,
+      sensorRaw: rE4 > 0 ? (rL4 / rE4).toFixed(1) + "×" : "—",
+      sensorHarm: hE4 > 0 ? (hL4 / hE4).toFixed(1) + "×" : "—",
+      firesVal, firesVsMed, firesRank, rankN: mc ? mc.nYears : 0,
+    };
+  }, [split, harmVals, rawVals, wxData, date, selection, selRange]);
 
   const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while points rebuild
   // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
@@ -1538,9 +1710,44 @@ export default function Vigil() {
     </div>
   );
 
-  const bb = region.bbox;
-  const sgn = (v: number) => (v >= 0 ? "+" : "−");
-  void bb; void sgn;
+  // Fire KPIs for selected month vs reference median
+  const { y: dy, m: dm } = date;
+  const refEnd = BASE_Y1;
+  const pctDiff = (cur: number | null, med: number): string | null => {
+    if (cur === null || med === 0) return null;
+    const d = Math.round(((cur - med) / med) * 100);
+    return (d >= 0 ? "+" : "−") + Math.abs(d) + " %";
+  };
+  const countDelta = pctDiff(vals[dy - Y0]?.[dm]?.total ?? null, monthMedian(vals, dm, KPI_REF_START, refEnd));
+  const frpDelta = pctDiff(frpVals[dy - Y0]?.[dm]?.total ?? null, monthMedian(frpVals, dm, KPI_REF_START, refEnd));
+
+  // Weather zone aggregation for selected month
+  const wxMonthRecs: MonthRecord[] = wxData
+    ? Object.values(wxData).flatMap((a) => a.filter((r) => r.y === dy && r.m === dm + 1))
+    : [];
+  const wxRefRecs: MonthRecord[] = wxData
+    ? Object.values(wxData).flat().filter((r) => r.m === dm + 1 && r.y >= KPI_REF_START && r.y <= refEnd)
+    : [];
+  const avg1 = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const med1 = (xs: number[]): number | null => {
+    if (!xs.length) return null;
+    const s = [...xs].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
+  };
+  const wxFmt = (cur: number | null, ref: number | null, unit: string, pct: boolean): string | null => {
+    if (cur === null || ref === null || ref === 0) return null;
+    const d = cur - ref;
+    const sign = d >= 0 ? "+" : "−";
+    if (pct) return `${sign}${Math.abs(Math.round((d / ref) * 100))} %`;
+    return `${sign}${Math.abs(d).toFixed(1)} ${unit}`;
+  };
+  const wxKpis: { label: string; val: string | null }[] = [
+    { label: "TMAX", val: wxFmt(avg1(wxMonthRecs.map((r) => r.tmax)), med1(wxRefRecs.map((r) => r.tmax)), "°C", false) },
+    { label: "RAIN", val: wxFmt(avg1(wxMonthRecs.map((r) => r.precip)), med1(wxRefRecs.map((r) => r.precip)), "", true) },
+    { label: "HUMIDITY", val: wxFmt(avg1(wxMonthRecs.map((r) => r.rh)), med1(wxRefRecs.map((r) => r.rh)), "%p", false) },
+    { label: "WIND", val: wxFmt(avg1(wxMonthRecs.map((r) => r.wind)), med1(wxRefRecs.map((r) => r.wind)), "m/s", false) },
+  ];
 
   /* ── Country search ── */
   const searchMatches = useMemo(() => {
@@ -1571,6 +1778,34 @@ export default function Vigil() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [searchOpen]);
+
+  useEffect(() => {
+    if (!split || !selection) { setWxStatus("idle"); setWxData(null); return; }
+    setWxStatus("loading");
+    const ring = selection.ring;
+    const isClosed = ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1];
+    const closed = isClosed ? ring : [...ring, ring[0]];
+    let cells: string[] = [];
+    try { cells = polygonToCells(closed, H3_RES, true); } catch { /* noop */ }
+    if (!cells.length) {
+      try { cells = gridDisk(latLngToCell(selection.region.lat, selection.region.lon, H3_RES), 2); } catch { /* noop */ }
+    }
+    if (!cells.length) { setWxStatus("unavailable"); return; }
+    // top 50 by proximity to centre (fire-activity sort is a TODO once per-cell data is available)
+    const top50 = cells.slice(0, 50);
+    const toParam = `${Y1}-${String(LAST_MONTH_Y1 + 1).padStart(2, "0")}`;
+    fetch(`/api/weather?cells=${encodeURIComponent(top50.join(","))}&from=${Y0}-01&to=${toParam}`)
+      .then((r) => r.json())
+      .then((d: unknown) => {
+        if (d && typeof d === "object" && "error" in d) {
+          setWxError(String((d as { error: unknown }).error));
+          setWxStatus("unavailable"); return;
+        }
+        setWxData(d as Record<string, MonthRecord[]>);
+        setWxStatus("ok");
+      })
+      .catch((e: unknown) => { setWxError(e instanceof Error ? e.message : "Network error"); setWxStatus("unavailable"); });
+  }, [split, selection]);
 
   return (
     <div className="hd-root">
@@ -1795,7 +2030,7 @@ export default function Vigil() {
         <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
           <div className="hd-split-head">
             <span className="hd-word-sm">Vigil</span>
-            <span className="hd-mono hd-name">{region.name}</span>
+            <span className="hd-mono hd-name">{selectionName}</span>
             <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw (one sensor per era)" }, { v: "harm", t: "Harmonized (MODIS-eq.)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
               <CollapseIcon />
@@ -1805,6 +2040,145 @@ export default function Vigil() {
             <section className="hd-split-pane" aria-label="Calendar">
               <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span></div>
               <div className="hd-split-cal">{renderCalendar(true)}</div>
+            </section>
+            <section className="hd-split-pane hd-split-analytics" aria-label="Analytics">
+              {/* 6 KPI tiles */}
+              <div className="hd-dd-kpi6">
+                <div className="hd-kpi-cell">
+                  <span className="hd-kpi-lbl">Hotspots</span>
+                  <span className="hd-kpi-val">{ddData?.firesVal != null ? fmtInt(ddData.firesVal) : "—"}</span>
+                  <span className="hd-kpi-sub">harmonized, MODIS-eq.</span>
+                </div>
+                <div className="hd-kpi-cell">
+                  <span className="hd-kpi-lbl">vs Median</span>
+                  <span className="hd-kpi-val">{ddData?.firesVsMed != null ? ddData.firesVsMed.toFixed(2) + "×" : "—"}</span>
+                </div>
+                <div className="hd-kpi-cell">
+                  <span className="hd-kpi-lbl">Rank</span>
+                  <span className="hd-kpi-val">{ddData?.firesRank != null ? `${ddData.firesRank} / ${ddData.rankN}` : "—"}</span>
+                </div>
+                <div className="hd-kpi-cell">
+                  <span className="hd-kpi-lbl">Tmax</span>
+                  <span className="hd-kpi-val">{wxStatus === "ok" ? (wxKpis[0].val ?? "—") : wxStatus === "loading" ? "…" : "—"}</span>
+                </div>
+                <div className="hd-kpi-cell">
+                  <span className="hd-kpi-lbl">Rain</span>
+                  <span className="hd-kpi-val">{wxStatus === "ok" ? (wxKpis[1].val ?? "—") : wxStatus === "loading" ? "…" : "—"}</span>
+                </div>
+                <div className="hd-kpi-cell">
+                  <span className="hd-kpi-lbl">Humidity</span>
+                  <span className="hd-kpi-val">{wxStatus === "ok" ? (wxKpis[2].val ?? "—") : wxStatus === "loading" ? "…" : "—"}</span>
+                </div>
+              </div>
+
+              {/* 2×2 chart grid */}
+              <div className="hd-dd-charts">
+                {/* Chart 1: Fires vs Temperature */}
+                <div className="hd-dd-chart">
+                  <div className="hd-dd-ctitle">Fires vs Temperature</div>
+                  <div className="hd-dd-chartbody">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={ddData?.c1 ?? []} margin={{ top: 4, right: 32, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" vertical={false} />
+                        <XAxis dataKey="label" tick={{ fontSize: 8, fill: "#94a3b8" }} interval={23} tickLine={false} axisLine={false} />
+                        <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
+                        <YAxis yAxisId="temp" orientation="right" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={22} unit="°" />
+                        <Tooltip contentStyle={{ fontSize: 10, background: "rgba(15,23,42,.92)", border: 0, color: "#f8fafc", borderRadius: 6, padding: "5px 9px" }} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
+                        <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                        <Line yAxisId="fires" type="monotone" dataKey="fires" stroke="#ea580c" strokeWidth={1} dot={false} name="Hotspots (harmonized)" />
+                        {wxStatus === "ok" && <Line yAxisId="temp" type="monotone" dataKey="tmax" stroke="#94a3b8" strokeWidth={1} dot={false} name="Tmax °C" connectNulls />}
+                        <ReferenceLine yAxisId="fires" x={`${dy}-${String(dm + 1).padStart(2, "0")}`} stroke="#0f172a" strokeWidth={1.5} strokeOpacity={0.4} />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                    {wxStatus === "unavailable" && <div className="hd-dd-nowx">Weather unavailable{wxError ? ` — ${wxError}` : ""}</div>}
+                  </div>
+                </div>
+
+                {/* Chart 2: Seasonal Profile */}
+                <div className="hd-dd-chart">
+                  <div className="hd-dd-ctitle">Seasonal Profile</div>
+                  <div className="hd-dd-chartbody">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={ddData?.c2 ?? []} margin={{ top: 4, right: 32, left: 0, bottom: 0 }}>
+                        <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" vertical={false} />
+                        <XAxis dataKey="name" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} />
+                        <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
+                        <YAxis yAxisId="wx" orientation="right" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={22} />
+                        <Tooltip contentStyle={{ fontSize: 10, background: "rgba(15,23,42,.92)", border: 0, color: "#f8fafc", borderRadius: 6, padding: "5px 9px" }} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
+                        <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                        <Bar yAxisId="fires" dataKey="fires" name="Hotspots (median)" radius={[2, 2, 0, 0]}>
+                          {(ddData?.c2 ?? []).map((entry, idx) => (
+                            <Cell key={idx} fill="#ea580c" fillOpacity={entry.sel ? 1 : 0.5} />
+                          ))}
+                        </Bar>
+                        {wxStatus === "ok" && <Line yAxisId="wx" type="monotone" dataKey="tmax" stroke="#94a3b8" strokeWidth={1.5} dot={false} name="Tmax (med.)" connectNulls />}
+                        {wxStatus === "ok" && <Line yAxisId="wx" type="monotone" dataKey="precip" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="4 3" dot={false} name="Precip (med.)" connectNulls />}
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                    {wxStatus === "unavailable" && <div className="hd-dd-nowx">Weather unavailable{wxError ? ` — ${wxError}` : ""}</div>}
+                  </div>
+                </div>
+
+                {/* Chart 3: Fires vs Hot/Dry Index */}
+                <div className="hd-dd-chart">
+                  <div className="hd-dd-ctitle">
+                    {"Fires vs Hot/Dry Index"}
+                    {ddData && !isNaN(ddData.spR) && <span className="hd-dd-corr"> · ρ = {ddData.spR.toFixed(2)} (Spearman)</span>}
+                  </div>
+                  <div className="hd-dd-chartbody">
+                    {(!ddData || (ddData.c3pre.length + ddData.c3post.length < 3)) ? (
+                      <div className="hd-dd-nowx">Weather unavailable{wxError ? ` — ${wxError}` : ""}</div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                          <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" />
+                          <XAxis type="number" dataKey="hdi" name="Hot/dry index" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} domain={[0, "dataMax"]} tickFormatter={(v: number) => v.toFixed(2)} />
+                          <YAxis type="number" dataKey="fires" name="Hotspots" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
+                          <Tooltip
+                            cursor={{ strokeDasharray: "3 3" }}
+                            content={({ active, payload }) => {
+                              if (!active || !payload?.length) return null;
+                              const d = payload[0]?.payload as { hdi: number; fires: number; label: string };
+                              return <div style={{ background: "rgba(15,23,42,.92)", color: "#f8fafc", borderRadius: 6, padding: "5px 9px", fontSize: 10 }}><div style={{ color: "#94a3b8", marginBottom: 2 }}>{d.label}</div><div>Fires: {fmtInt(d.fires)}</div><div>HDI: {d.hdi.toFixed(3)}</div></div>;
+                            }}
+                          />
+                          <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                          <Scatter name="2000–2011" data={ddData.c3pre} fill="#ea580c" fillOpacity={0.65} />
+                          <Scatter name="2012–2026" data={ddData.c3post} fill="#64748b" fillOpacity={0.65} />
+                        </ScatterChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </div>
+
+                {/* Chart 4: 2012 Sensor Check (MODIS/VIIRS) */}
+                <div className="hd-dd-chart">
+                  <div className="hd-dd-ctitle">
+                    {"2012 Sensor Check (MODIS/VIIRS)"}
+                    {ddData?.sensorRaw !== "—" && <span className="hd-dd-corr"> · raw {ddData?.sensorRaw} · harm. {ddData?.sensorHarm}</span>}
+                  </div>
+                  <div className="hd-dd-chartbody">
+                    {(!ddData || ddData.c4.length < 3) ? (
+                      <div className="hd-dd-nowx">Weather unavailable{wxError ? ` — ${wxError}` : ""}</div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={ddData.c4} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                          <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" vertical={false} />
+                          <XAxis dataKey="year" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} interval={3} />
+                          <YAxis tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
+                          <Tooltip contentStyle={{ fontSize: 10, background: "rgba(15,23,42,.92)", border: 0, color: "#f8fafc", borderRadius: 6, padding: "5px 9px" }} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
+                          <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
+                          <Line type="monotone" dataKey="raw" stroke="#94a3b8" strokeWidth={1.5} dot={false} name="Raw" />
+                          <Line type="monotone" dataKey="harm" stroke="#ea580c" strokeWidth={1.5} dot={false} name="Harmonized" />
+                          <ReferenceLine x={2012} stroke="#0f172a" strokeDasharray="4 2" strokeOpacity={0.4} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <p className="hd-wx-attr">Weather: Meteomatics API — H3 res 5 cell centres (~253 km²)</p>
             </section>
           </div>
         </div>
@@ -2006,4 +2380,26 @@ const CSS = `
   .hd-stripes{height:56px}
 }
 @media (prefers-reduced-motion:reduce){.hd-root *{transition:none!important}}
+
+.hd-split-body{gap:8px}
+.hd-split-pane:not(.hd-split-analytics){flex:0 0 44%}
+.hd-split-analytics{flex:1;overflow:hidden;min-width:0;display:flex;flex-direction:column;gap:6px}
+.hd-dd-kpi6{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;flex-shrink:0}
+.hd-dd-kpi6 .hd-kpi-cell{min-width:0;padding:5px 7px}
+.hd-dd-kpi6 .hd-kpi-val{font-size:13px}
+.hd-kpi-sub{font-size:9px;color:var(--mut)}
+.hd-dd-charts{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:6px}
+.hd-dd-chart{background:var(--bg);border:1px solid rgba(15,23,42,0.1);border-radius:8px;padding:7px 9px 5px;display:flex;flex-direction:column;gap:3px;min-height:0;overflow:hidden}
+.hd-dd-ctitle{font-size:9px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hd-dd-corr{font-weight:400;text-transform:none;letter-spacing:0;font-size:9px}
+.hd-dd-chartbody{flex:1;min-height:0;position:relative}
+.hd-dd-nowx{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--mut);font-style:italic;text-align:center;padding:8px}
+.hd-kpi-band{display:flex;flex-wrap:wrap;gap:5px;margin-top:2px}
+.hd-kpi-cell{flex:1;min-width:calc(50% - 3px);background:rgba(15,23,42,.03);border:1px solid var(--bd);border-radius:6px;padding:7px 9px;display:flex;flex-direction:column;gap:2px}
+.hd-kpi-lbl{font-size:9.5px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
+.hd-kpi-val{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;color:var(--tx)}
+.hd-kpi-val[data-neg="true"]{color:var(--gr)}
+.hd-wx-unavail{font-size:11px;color:var(--mut);font-style:italic;margin:4px 0 0}
+.hd-wx-attr{font-size:9.5px;color:var(--mut);font-style:italic;margin:0;margin-top:auto;padding-top:8px}
+@media (max-width:900px){.hd-split-analytics{display:none}}
 `;
