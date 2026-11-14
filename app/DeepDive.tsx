@@ -18,7 +18,7 @@ import {
 import { indiceMois, texteMois, type IndexV2, type Ring } from "./donnees";
 import type { Metrique, MoisZone, SerieZone } from "./zone";
 import * as S from "./stats";
-import { dashboardCsv, gridsOf, type Grids } from "./exportDashboard";
+import { gridsOf, type Grids } from "./exportDashboard";
 import { usePalette } from "./palette";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -112,7 +112,6 @@ type MonthRecord = { y: number; m: number; tmax: number; precip: number; rh: num
 export default function DeepDive({ index, serie, metrique, focus, onPickMonth, title, zoneNote, ring, bbox, period }: DeepDiveProps) {
   const mz = (y: number, m: number): MoisZone | null => (serie ? serie.mois[indiceMois(index, y, m)] ?? null : null);
   const k0 = S.mkey(period.from.y, period.from.m), k1 = S.mkey(period.to.y, period.to.m);
-  const [exportMsg, setExportMsg] = useState("");
 
   /* Monthly grids of both metrics (null = month not exported = no data, never 0), shared with the CSV export */
   const grids = useMemo(() => (serie ? gridsOf(index, serie) : null), [serie, index]);
@@ -124,17 +123,6 @@ export default function DeepDive({ index, serie, metrique, focus, onPickMonth, t
     return c.converti && lo !== null && hi !== null ? [lo, hi] : null;
   };
   const smallZone = serie.source === "h3" && serie.hexagones.length < MIN_HEX_BAND;
-  const exporter = () => {
-    try {
-      const csv = dashboardCsv({ index, serie, title: title || "Selected zone", zoneNote: zoneNote || "", k0, k1, focus, bbox, ring });
-      const a = document.createElement("a"), url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-      a.href = url;
-      a.download = `vigil_dashboard_${(title || "zone").replace(/[^a-z0-9]/gi, "_")}_${texteMois(period.from.y, period.from.m)}_${texteMois(period.to.y, period.to.m)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setExportMsg("Exported: summary, monthly series, climatology and annual tables (both metrics).");
-    } catch (e) { setExportMsg(`Export failed: ${String((e as Error).message || e)}`); }
-  };
 
   return (
     <div className="dd-root">
@@ -143,10 +131,6 @@ export default function DeepDive({ index, serie, metrique, focus, onPickMonth, t
         <div>
           <h2 className="dd-title">{title || "Selected zone"} <span className="dd-title-sub">· {texteMois(period.from.y, period.from.m)} → {texteMois(period.to.y, period.to.m)} · {nameOf(metrique)} per month, MODIS-Aqua equivalent</span></h2>
           {zoneNote && <p className="dd-note">{zoneNote}{serie.fiabilite === "faible" ? " — little data, conversion less certain" : ""}</p>}
-        </div>
-        <div className="dd-head-act">
-          <button className="dd-export" onClick={exporter} title="Every table of this dashboard for the zone and period, both metrics, as one CSV file">Export dashboard (CSV)</button>
-          {exportMsg && <span className="dd-hint" role="status">{exportMsg}</span>}
         </div>
       </header>
       <Kpis g={g} grids={grids} metrique={metrique} focus={focus} mz={mz} bandOf={bandOf} k0={k0} k1={k1} />
