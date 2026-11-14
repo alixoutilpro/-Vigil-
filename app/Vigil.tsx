@@ -7,7 +7,7 @@
  * inside the region bbox; otherwise they fall back to the seeded generator.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import contractData from "../data/data.json";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
@@ -430,6 +430,39 @@ function isoWeekMonth(isoYear: number, isoWeek: number): { y: number; m: number 
   return { y: thu.getUTCFullYear(), m: thu.getUTCMonth() };
 }
 
+/**
+ * Weeks are attributed to the month of their Thursday, so a month holds 4 or 5 weeks of data.
+ * Summing raw weeks would inflate every 5-Thursday month by ~25% and under-count a partial last month.
+ * monthScale() converts "sum of the weeks present" into a per-calendar-month figure:
+ * days in month / (7 x number of weeks actually covered by the data in that month).
+ */
+let LAST_THURSDAY: number | null = null;
+function lastContractThursday(): number {
+  if (LAST_THURSDAY !== null) return LAST_THURSDAY;
+  let best = 0;
+  for (const r of CONTRACT) {
+    const t = Date.UTC(r.iso_year, 0, 4 + (r.iso_week - 1) * 7 + (4 - (new Date(Date.UTC(r.iso_year, 0, 4)).getUTCDay() || 7)));
+    if (t > best) best = t;
+  }
+  return (LAST_THURSDAY = best);
+}
+const MONTH_SCALE = new Map<number, number>();
+function monthScale(y: number, m: number): number {
+  const key = y * 12 + m;
+  const hit = MONTH_SCALE.get(key);
+  if (hit !== undefined) return hit;
+  const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const last = lastContractThursday();
+  let covered = 0;
+  for (let d = 1; d <= dim; d++) {
+    const t = Date.UTC(y, m, d);
+    if (new Date(t).getUTCDay() === 4 && t <= last) covered++;
+  }
+  const f = covered > 0 ? dim / (7 * covered) : 1;
+  MONTH_SCALE.set(key, f);
+  return f;
+}
+
 let CONTRACT_END: { y: number; m: number } | null = null;
 function contractEnd() {
   if (CONTRACT_END) return CONTRACT_END;
@@ -442,10 +475,12 @@ function contractEnd() {
 }
 
 /** Monthly cells for a region from data/data.json, or null when no contract cell lies in its bbox. */
-function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
+function contractRegionData(r: RegionDef, ring?: Ring): (Cell | null)[][] | null {
   const [la0, la1, lo0, lo1] = r.bbox;
   const rows = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
   if (!rows.length) return null;
+  // Same cells as the map points: with a drawn polygon only the cells inside it are summed
+  // (coverage / first month still come from every cell in the bbox, so excluded months read 0, not "no data").
   const acc = Array.from({ length: NY }, () =>
     Array.from({ length: 12 }, () => ({ modis: 0, viirs: 0, harm: 0, wild: 0 })));
   let first = { y: 9999, m: 0 };
@@ -453,6 +488,7 @@ function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
     const k = isoWeekMonth(c.iso_year, c.iso_week);
     if (k.y < Y0 || k.y > Y1) continue;
     if (k.y < first.y || (k.y === first.y && k.m < first.m)) first = k;
+    if (ring && !pip(c.lon, c.lat, ring)) continue;
     const a = acc[k.y - Y0][k.m];
     a.modis += c.modis_fire_days ?? 0;
     a.viirs += c.viirs_fire_days ?? 0;
@@ -461,8 +497,10 @@ function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
   }
   const end = contractEnd();
   return acc.map((row, yi) =>
-    row.map((a, m): Cell | null => {
+    row.map((raw, m): Cell | null => {
       const y = Y0 + yi;
+      const sc = monthScale(y, m);
+      const a = { modis: raw.modis * sc, viirs: raw.viirs * sc, harm: raw.harm * sc, wild: raw.wild * sc };
       if (y < first.y || (y === first.y && m < first.m) || y > end.y || (y === end.y && m > end.m)) return null;
       const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
       return {
@@ -474,8 +512,8 @@ function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
     }));
 }
 
-function regionData(r: RegionDef): (Cell | null)[][] {
-  return contractRegionData(r) ?? generateRegionData(r);
+function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
+  return contractRegionData(r, ring) ?? generateRegionData(r);
 }
 
 /** Value of a cell for a given harmonization variant / metric / fire-type filter. */
@@ -652,7 +690,8 @@ function getClusters(): Cluster[] {
 interface HotFeature {
   type: "Feature";
   geometry: { type: "Point"; coordinates: [number, number] };
-  properties: { frp: number; sensor: "MODIS" | "VIIRS"; date: string };
+  /** `days` is only set on points derived from data/data.json (fire-days in the cell for that month). */
+  properties: { frp: number; sensor: "MODIS" | "VIIRS" | "Harmonized"; date: string; days?: number };
 }
 type HotCollection = { type: "FeatureCollection"; features: HotFeature[] };
 
@@ -761,6 +800,85 @@ function getHotspotsForExport(ring: Ring, range: DateRange): { rows: ExportRow[]
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
+/* Map points for a selected region + study period                            */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const MAX_MAP_POINTS = 40000;
+const MORPH_MS = 1100; // globe <-> plan animation
+const MAX_POINTS_PER_CELL_MONTH = 31;
+const monthKey = (y: number, m: number) => y * 12 + m;
+
+interface RangeHotspots { fc: HotCollection; source: "contract" | "simulated"; capped: boolean }
+
+/**
+ * Points shown on the map for the Region card (selection + From/To study period).
+ * - If data/data.json has cells inside the region bbox (same test as regionData), one point per
+ *   cell and month is drawn from the contract's fire-days (raw: MODIS / VIIRS, harmonized: one point).
+ * - Otherwise falls back to the synthetic generator over the period, like regionData does.
+ */
+function buildRangeHotspots(sel: { region: RegionDef; ring: Ring }, range: DateRange, variant: Variant): RangeHotspots {
+  const { region, ring } = sel;
+  const [la0, la1, lo0, lo1] = region.bbox;
+  const kLo = monthKey(range.from.y, range.from.m), kHi = monthKey(range.to.y, range.to.m);
+
+  const inBbox = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
+  if (inBbox.length) {
+    const acc = new Map<string, { lat: number; lon: number; y: number; m: number; modis: number; viirs: number; harm: number }>();
+    for (const c of inBbox) {
+      if (!pip(c.lon, c.lat, ring)) continue;
+      const k = isoWeekMonth(c.iso_year, c.iso_week);
+      const key = monthKey(k.y, k.m);
+      if (key < kLo || key > kHi) continue;
+      const id = `${c.cell_id}:${key}`;
+      let a = acc.get(id);
+      if (!a) acc.set(id, (a = { lat: c.lat, lon: c.lon, y: k.y, m: k.m, modis: 0, viirs: 0, harm: 0 }));
+      a.modis += c.modis_fire_days ?? 0;
+      a.viirs += c.viirs_fire_days ?? 0;
+      a.harm += c.harmonized_fire_days;
+    }
+    // Same 4/5-week normalisation as the calendar, so points and calendar agree.
+    for (const a of acc.values()) {
+      const sc = monthScale(a.y, a.m);
+      a.modis *= sc; a.viirs *= sc; a.harm *= sc;
+    }
+    const features: HotFeature[] = [];
+    const frp = Math.round(region.frp * 10) / 10; // FRP is not in the contract: region mean per fire-day
+    // The contract only has fire-days per 0.1° cell and month (no positions): draw one point per
+    // fire-day (capped), spread deterministically inside the cell so density follows the counts.
+    const add = (a: { lat: number; lon: number; y: number; m: number }, id: string, sensor: HotFeature["properties"]["sensor"], days: number) => {
+      const n = Math.min(MAX_POINTS_PER_CELL_MONTH, Math.round(days));
+      if (n <= 0) return;
+      const rng = mulberry32(hashStr(`${id}:${sensor}`));
+      const date = `${a.y}-${String(a.m + 1).padStart(2, "0")}`;
+      for (let i = 0; i < n; i++) {
+        features.push({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [a.lon + (rng() - 0.5) * 0.1, a.lat + (rng() - 0.5) * 0.1] },
+          properties: { frp, sensor, days: 1, date },
+        });
+      }
+    };
+    for (const [id, a] of acc) {
+      if (variant === "raw") { add(a, id, "MODIS", a.modis); add(a, id, "VIIRS", a.viirs); }
+      else add(a, id, "Harmonized", a.harm);
+    }
+    return { fc: { type: "FeatureCollection", features }, source: "contract", capped: false };
+  }
+
+  const features: HotFeature[] = [];
+  for (let key = kLo; key <= kHi; key++) {
+    const y = Math.floor(key / 12), m = key % 12;
+    for (const f of buildHotspots(y, m, variant).features) {
+      const [lon, lat] = f.geometry.coordinates;
+      if (lat >= la0 && lat <= la1 && lon >= lo0 && lon <= lo1 && pip(lon, lat, ring)) features.push(f);
+    }
+  }
+  const capped = features.length > MAX_MAP_POINTS;
+  const kept = capped ? features.filter((_, i) => i % Math.ceil(features.length / MAX_MAP_POINTS) === 0) : features;
+  return { fc: { type: "FeatureCollection", features: kept }, source: "simulated", capped };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
 /* Map styles                                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
 
@@ -786,6 +904,23 @@ const SAT_STYLE: StyleSpecification = {
 const HEAT_STOPS: [number, [number, number, number]][] = [
   [0, [254, 243, 199]], [0.25, [252, 211, 77]], [0.5, [251, 146, 60]], [0.72, [234, 88, 12]], [0.88, [220, 38, 38]], [1, [127, 29, 29]],
 ];
+/**
+ * Absolute calendar scale, shared by every region: the 98th percentile of monthly totals over all
+ * preset regions (per data series). A cell is dark when the month is strong in absolute terms,
+ * not just relative to its own region.
+ */
+const HEAT_REF: Partial<Record<Variant, number>> = {};
+function absoluteHeatMax(variant: Variant): number {
+  const cached = HEAT_REF[variant];
+  if (cached) return cached;
+  const all: number[] = [];
+  for (const r of REGIONS) {
+    for (const row of monthlyValues(regionData(r), variant, "count", "all")) for (const c of row) if (c) all.push(c.total);
+  }
+  all.sort((a, b) => a - b);
+  return (HEAT_REF[variant] = all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1);
+}
+
 function heatColor(t: number): string {
   t = clamp(t, 0, 1);
   for (let i = 1; i < HEAT_STOPS.length; i++) {
@@ -887,29 +1022,29 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   /* ── Date range ── */
   const toMonthStr = (y: number, m: number) => `${y}-${String(m + 1).padStart(2, "0")}`;
-  const fromMonthStr = (s: string) => { const [y, m] = s.split("-").map(Number); return { y, m: m - 1 }; };
-  const minMonth = toMonthStr(Y0, FIRST_MONTH_Y0);
-  const maxMonth = toMonthStr(LATEST.y, LATEST.m);
   const [rangeErr, setRangeErr] = useState("");
 
-  const handleFromChange = (val: string) => {
-    const f = fromMonthStr(val);
-    if (f.y > range.to.y || (f.y === range.to.y && f.m > range.to.m)) {
-      setRangeErr("From must be earlier than To");
-    } else {
-      setRangeErr("");
-      onRangeChange({ ...range, from: f });
-    }
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const YEARS = Array.from({ length: LATEST.y - Y0 + 1 }, (_, i) => Y0 + i);
+  const key = (d: { y: number; m: number }) => d.y * 12 + d.m;
+  const minKey = key({ y: Y0, m: FIRST_MONTH_Y0 }), maxKey = key(LATEST);
+  const fromKey = (k: number) => ({ y: Math.floor(k / 12), m: k % 12 });
+  const clampKey = (k: number) => Math.min(maxKey, Math.max(minKey, k));
+
+  // Draft range: edited freely in the selects, only pushed to the map on "Apply".
+  const [draft, setDraftRange] = useState<DateRange>(range);
+  useEffect(() => { setDraftRange(range); }, [range]);
+  const dirty = key(draft.from) !== key(range.from) || key(draft.to) !== key(range.to);
+
+  // Changing one bound never gets rejected: if it crosses the other bound, the other one follows.
+  const setBound = (which: "from" | "to", part: "y" | "m", value: number) => {
+    const next = fromKey(clampKey(key({ ...draft[which], [part]: value })));
+    let { from, to } = draft;
+    if (which === "from") { from = next; if (key(from) > key(to)) to = next; }
+    else { to = next; if (key(to) < key(from)) from = next; }
+    setDraftRange({ from, to });
   };
-  const handleToChange = (val: string) => {
-    const t = fromMonthStr(val);
-    if (range.from.y > t.y || (range.from.y === t.y && range.from.m > t.m)) {
-      setRangeErr("From must be earlier than To");
-    } else {
-      setRangeErr("");
-      onRangeChange({ ...range, to: t });
-    }
-  };
+  const applyRange = () => { setRangeErr(""); onRangeChange(draft); };
 
   /* ── Export ── */
   const [exportErr, setExportErr] = useState("");
@@ -1011,30 +1146,35 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         <div className="hd-rc-seclabel">Study period</div>
         <div className="hd-rc-rangerow">
           <div className="hd-rc-field">
-            <label htmlFor="hd-range-from" className="hd-rc-fieldlabel">From</label>
-            <input
-              id="hd-range-from"
-              type="month"
-              className="hd-rc-monthinput"
-              min={minMonth}
-              max={maxMonth}
-              value={toMonthStr(range.from.y, range.from.m)}
-              onChange={(e) => handleFromChange(e.target.value)}
-            />
+            <label htmlFor="hd-range-from-m" className="hd-rc-fieldlabel">From</label>
+            <div className="hd-rc-datepair">
+              <select id="hd-range-from-m" className="hd-rc-monthinput" aria-label="From month"
+                value={draft.from.m} onChange={(e) => setBound("from", "m", Number(e.target.value))}>
+                {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              <select id="hd-range-from-y" className="hd-rc-monthinput" aria-label="From year"
+                value={draft.from.y} onChange={(e) => setBound("from", "y", Number(e.target.value))}>
+                {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
           </div>
           <div className="hd-rc-field">
-            <label htmlFor="hd-range-to" className="hd-rc-fieldlabel">To</label>
-            <input
-              id="hd-range-to"
-              type="month"
-              className="hd-rc-monthinput"
-              min={minMonth}
-              max={maxMonth}
-              value={toMonthStr(range.to.y, range.to.m)}
-              onChange={(e) => handleToChange(e.target.value)}
-            />
+            <label htmlFor="hd-range-to-m" className="hd-rc-fieldlabel">To</label>
+            <div className="hd-rc-datepair">
+              <select id="hd-range-to-m" className="hd-rc-monthinput" aria-label="To month"
+                value={draft.to.m} onChange={(e) => setBound("to", "m", Number(e.target.value))}>
+                {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              <select id="hd-range-to-y" className="hd-rc-monthinput" aria-label="To year"
+                value={draft.to.y} onChange={(e) => setBound("to", "y", Number(e.target.value))}>
+                {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
           </div>
         </div>
+        <button className="hd-rc-apply" aria-label="Apply study period to map" disabled={!dirty} onClick={applyRange}>
+          Apply
+        </button>
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
       </div>
 
@@ -1074,7 +1214,45 @@ function CollapseIcon() {
   );
 }
 
+/** Drag a floating panel by its header. Offset is applied as a CSS transform; the header stays on screen. */
+function useDrag() {
+  const ref = useRef<HTMLElement>(null);
+  const [off, setOff] = useState({ x: 0, y: 0 });
+  const start = useRef<{ px: number; py: number; ox: number; oy: number; r: DOMRect } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button,input,select,a")) return;
+    const el = ref.current;
+    if (!el) return;
+    start.current = { px: e.clientX, py: e.clientY, ox: off.x, oy: off.y, r: el.getBoundingClientRect() };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragging(true);
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    const s = start.current;
+    if (!s) return;
+    const dx = clamp(e.clientX - s.px, 48 - s.r.right, window.innerWidth - 48 - s.r.left);
+    const dy = clamp(e.clientY - s.py, -s.r.top, window.innerHeight - 40 - s.r.top);
+    setOff({ x: s.ox + dx, y: s.oy + dy });
+  };
+  const end = () => { start.current = null; setDragging(false); };
+
+  return {
+    ref,
+    style: { transform: `translate(${off.x}px, ${off.y}px)` } as React.CSSProperties,
+    dragging,
+    handle: {
+      onPointerDown, onPointerMove, onPointerUp: end, onPointerCancel: end,
+      onDoubleClick: (e: React.MouseEvent) => { if (!(e.target as HTMLElement).closest("button,input,select,a")) setOff({ x: 0, y: 0 }); },
+      title: "Drag to move · double-click to reset",
+    },
+  };
+}
+
 export default function Vigil() {
+  const leftDrag = useDrag();
+  const rightDrag = useDrag();
   const [mode, setMode] = useState<Variant>("raw");
   const metric: Metric = "count";
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -1094,6 +1272,8 @@ export default function Vigil() {
   const [hoverYear, setHoverYear] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [flat, setFlat] = useState(false);
+  const flatRef = useRef(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLDivElement>(null);
@@ -1115,20 +1295,24 @@ export default function Vigil() {
 
   /* ── Derived data ── */
   const region = selection?.region ?? REGIONS[0];
-  const data = useMemo(() => regionData(region), [region]);
+  const data = useMemo(() => regionData(region, selection?.ring), [region, selection]);
   const rawVals = useMemo(() => monthlyValues(data, "raw", metric, "all"), [data, metric]);
   const harmVals = useMemo(() => monthlyValues(data, "harm", metric, "all"), [data, metric]);
   const vals = mode === "raw" ? rawVals : harmVals;
   const rawAnnual = useMemo(() => annualSeries(rawVals), [rawVals]);
   const harmAnnual = useMemo(() => annualSeries(harmVals), [harmVals]);
-  const heatMax = useMemo(() => {
-    const all: number[] = [];
-    vals.forEach((r) => r.forEach((c) => c && all.push(c.total)));
-    all.sort((a, b) => a - b);
-    return all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1;
-  }, [vals]);
+  const heatMax = useMemo(() => absoluteHeatMax(mode), [mode]);
 
-  const hotspots = useMemo(() => buildHotspots(date.y, date.m, mode), [date, mode]);
+  const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while points rebuild
+  // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
+  const rangeHot = useMemo(
+    () => (selection ? buildRangeHotspots(selection, deferredRange, mode) : null),
+    [selection, deferredRange, mode],
+  );
+  const hotspots = useMemo(
+    () => rangeHot?.fc ?? buildHotspots(date.y, date.m, mode),
+    [rangeHot, date, mode],
+  );
 
   /* ── Map: push GeoJSON into sources ── */
   const pushSources = useCallback(() => {
@@ -1236,7 +1420,10 @@ export default function Vigil() {
 
       const install = () => {
         if (!map) return;
-        try { if (map.getProjection()?.type !== "globe") map.setProjection({ type: "globe" }); } catch { /* older style spec */ }
+        try {
+          const want = flatRef.current ? "mercator" : "globe";
+          if (map.getProjection()?.type !== want) map.setProjection({ type: want });
+        } catch { /* older style spec */ }
         if (!map.getSource("hotspots")) {
           map.addSource("hotspots", { type: "geojson", data: hotRef.current as never });
           map.addSource("sel", { type: "geojson", data: selFcRef.current as never });
@@ -1268,11 +1455,11 @@ export default function Vigil() {
       map.on("click", "hotspots", (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const f = e.features[0];
-        const p = f.properties as { frp: number; sensor: string; date: string };
+        const p = f.properties as { frp: number; sensor: string; date: string; days?: number };
         const [lng, lat] = (f.geometry as unknown as { coordinates: [number, number] }).coordinates;
         new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
           .setLngLat([lng, lat])
-          .setHTML(`<table><tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr><tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
+          .setHTML(`<table>${p.days != null ? `<tr><td>Fire-day</td><td>${p.sensor} · cell data.json</td></tr>` : `<tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr>`}<tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
           .addTo(map);
       });
 
@@ -1333,6 +1520,68 @@ export default function Vigil() {
     return () => { cancelled = true; map?.remove(); mapRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
+  // MapLibre morphs globe <-> mercator through a zoom-driven expression, so each frame we slide the
+  // two stops around the current zoom to put the morph at ratio t (0 = globe, 1 = plan) without moving the view.
+  const prevFlatRef = useRef(false);
+  useEffect(() => {
+    flatRef.current = flat;
+    const m = mapRef.current;
+    if (!m || !ready) return;
+    const from = prevFlatRef.current;
+    prevFlatRef.current = flat;
+
+    const settle = () => {
+      try {
+        m.setProjection({ type: flat ? "mercator" : "globe" });
+        // A flat plan stays north-up and top-down; the globe keeps tilt and rotation.
+        m.setMaxPitch(flat ? 0 : 75);
+      } catch { /* older style spec */ }
+    };
+    // After a morph MapLibre can keep the tile coverage computed for an intermediate projection,
+    // leaving blank rectangles: re-set the raster tile URLs so every source re-requests its tiles.
+    const refreshTiles = () => {
+      try {
+        for (const id of ["sat", "roads", "places"]) {
+          const src = SAT_STYLE.sources[id] as { tiles: string[] };
+          (m.getSource(id) as unknown as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.(src.tiles);
+        }
+        m.triggerRepaint();
+      } catch { /* source not ready */ }
+    };
+    try {
+      if (flat) {
+        m.dragRotate.disable();
+        m.touchZoomRotate.disableRotation();
+        m.easeTo({ pitch: 0, bearing: 0, duration: MORPH_MS });
+      } else {
+        m.setMaxPitch(75);
+        m.dragRotate.enable();
+        m.touchZoomRotate.enableRotation();
+      }
+    } catch { /* older style spec */ }
+
+    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (from === flat || reduce) { settle(); if (from !== flat) refreshTiles(); return; }
+
+    let raf = 0;
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const p = clamp((now - t0) / MORPH_MS, 0, 1);
+      const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; // easeInOutCubic
+      const t = flat ? e : 1 - e;
+      const z = m.getZoom();
+      try {
+        m.setProjection({
+          type: ["interpolate", ["linear"], ["zoom"], z - t, "vertical-perspective", z + 1 - t, "mercator"],
+        } as never);
+      } catch { settle(); refreshTiles(); return; }
+      if (p < 1) raf = requestAnimationFrame(step); else { settle(); refreshTiles(); }
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [flat, ready]);
 
   // Tool side effects
   useEffect(() => {
@@ -1410,20 +1659,35 @@ export default function Vigil() {
           <div className="hd-heat-row">{large || yi % 2 === 0 ? Y0 + yi : ""}</div>
           {row.map((c, m) => {
             const bg = !c ? undefined : c.total < heatMax * 0.015 ? "#e8edf3" : heatColor(Math.pow(c.total / heatMax, 0.62));
-            const sel = date.y === Y0 + yi && date.m === m;
+            const k = (Y0 + yi) * 12 + m;
+            const inRange = k >= selRange.from.y * 12 + selRange.from.m && k <= selRange.to.y * 12 + selRange.to.m;
+            const sel = selection ? inRange && selRange.from.y * 12 + selRange.from.m === selRange.to.y * 12 + selRange.to.m : date.y === Y0 + yi && date.m === m;
             return (
               <div
                 key={m}
-                className={"hd-cell" + (c ? "" : " empty") + (sel ? " sel" : "")}
+                className={"hd-cell" + (c ? "" : " empty") + (sel ? " sel" : "") + (selection && !inRange ? " out" : "")}
                 style={{ background: bg }}
                 onMouseMove={(e) => setTip({ x: e.clientX, y: e.clientY, yi, m })}
-                onClick={() => c && setDate({ y: Y0 + yi, m })}
+                onClick={(e) => {
+                  if (!c) return;
+                  if (!selection) { setDate({ y: Y0 + yi, m }); return; }
+                  // With a selection the calendar edits the study period: click = that month, shift+click = extend.
+                  const cur = { y: Y0 + yi, m };
+                  if (e.shiftKey) {
+                    const a = selRange.from, lo = k < a.y * 12 + a.m;
+                    setSelRange(lo ? { from: cur, to: selRange.to } : { from: selRange.from, to: cur });
+                  } else setSelRange({ from: cur, to: cur });
+                }}
                 aria-label={c ? `${MONTHS[m]} ${Y0 + yi}: ${fmtInt(c.total)} ${unit(metric)}` : `${MONTHS[m]} ${Y0 + yi}: no data`}
               />
             );
           })}
         </React.Fragment>
       ))}
+      <div className="hd-heat-legend">
+        <span>0</span><i />
+        <span>≥ {fmtInt(Math.round(heatMax))} fire-days / month · same scale for every region</span>
+      </div>
     </div>
   );
 
@@ -1515,6 +1779,7 @@ export default function Vigil() {
           <button className={"hd-btn" + (tool === "poly" ? " on" : "")} onClick={() => pickTool("poly")}>Polygon</button>
           {tool === "poly" && polyN >= 3 && <button className="hd-btn accent" onClick={finishPoly}>Finish</button>}
           {selection && <button className="hd-btn" onClick={clearSelection}>Clear</button>}
+          <button className="hd-btn" onClick={() => setFlat(!flat)} aria-pressed={flat} title={flat ? "Switch to 3D globe" : "Switch to 2D map"}>{flat ? "3D" : "2D"}</button>
         </div>
       </div>
 
@@ -1528,11 +1793,25 @@ export default function Vigil() {
       {/* Date + legend */}
       <div className="hd-datechip">
         <div className="hd-date-row">
-          <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
-          <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
-          <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
-          <span className="hd-mono">{fmtInt(hotspots.features.length)} hotspots</span>
-          {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
+          {rangeHot ? (
+            <>
+              <b className="hd-mono">
+                {`${selRange.from.y}-${String(selRange.from.m + 1).padStart(2, "0")} → ${selRange.to.y}-${String(selRange.to.m + 1).padStart(2, "0")}`}
+              </b>
+              <span className="hd-mono">
+                {fmtInt(hotspots.features.length)} {rangeHot.source === "contract" ? "fire-days (data.json)" : "hotspots (simulated)"}
+                {rangeHot.capped ? ` · sampled to ${fmtInt(MAX_MAP_POINTS)}` : ""}
+              </span>
+            </>
+          ) : (
+            <>
+              <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
+              <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
+              <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
+              <span className="hd-mono">{fmtInt(hotspots.features.length)} hotspots</span>
+              {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
+            </>
+          )}
         </div>
         <div className="hd-frp-legend">
           <span>FRP MW</span>
@@ -1544,8 +1823,8 @@ export default function Vigil() {
 
       {/* Left panel: Region card */}
       {selection && (
-        <aside className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed")} aria-label="Region settings">
-          <div className="hd-panel-head">
+        <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
+          <div className="hd-panel-head" {...leftDrag.handle}>
             <span className="hd-mono hd-name">{selectionName}</span>
             <button className="hd-icon" onClick={() => setPanelLeftOpen(!panelLeftOpen)} aria-label={panelLeftOpen ? "Collapse region panel" : "Expand region panel"} aria-expanded={panelLeftOpen}>
               <svg width="12" height="12" viewBox="0 0 14 14"><path d={panelLeftOpen ? "M2 5l5 5 5-5" : "M2 9l5-5 5 5"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" /></svg>
@@ -1568,8 +1847,8 @@ export default function Vigil() {
 
       {/* Analytics panel */}
       {selection && (
-        <aside className={"hd-panel" + (panelOpen ? "" : " collapsed")} aria-label="Analytics">
-          <div className="hd-panel-head">
+        <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
+          <div className="hd-panel-head" {...rightDrag.handle}>
             <div className="hd-head-actions">
               <button className="hd-icon" onClick={() => setSplit(true)} aria-label="Deep dive: calendar full screen" title="Deep dive">
                 <ExpandIcon />
@@ -1707,12 +1986,14 @@ const CSS = `
 
 .hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
   background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
-.hd-panel-left{position:absolute;left:12px;top:70px;bottom:100px;z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
+.hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
   background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
-.hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 14px;display:flex;flex-direction:column;gap:0}
+.hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
 .hd-panel-left .hd-region-card{border-bottom:0}
-.hd-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
+.hd-panel-head{cursor:grab;touch-action:none;user-select:none;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
 .hd-name{font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
+.dragging .hd-panel-head{cursor:grabbing}
+.hd-panel.dragging,.hd-panel-left.dragging{box-shadow:0 10px 36px rgba(15,23,42,.28)}
 .hd-icon{border:0;background:transparent;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;padding:0;color:var(--tx)}
 .hd-icon:hover{background:rgba(15,23,42,.07)}
 .hd-panel-body{overflow:auto;padding:4px 0 14px;display:flex;flex-direction:column;gap:12px}
@@ -1738,6 +2019,9 @@ const CSS = `
 .hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
+.hd-heat-legend{grid-column:1 / -1;display:flex;align-items:center;gap:6px;margin-top:4px;font-size:9.5px;color:var(--mut)}
+.hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:linear-gradient(90deg,#e8edf3,rgb(254,243,199) 4%,rgb(252,211,77) 25%,rgb(251,146,60) 50%,rgb(234,88,12) 72%,rgb(220,38,38) 88%,rgb(127,29,29))}
+.hd-cell.out{opacity:.35}
 .hd-cell.sel{outline:1.5px solid var(--tx);outline-offset:0;position:relative;z-index:1}
 .hd-cell:hover{outline:1px solid var(--tx);outline-offset:0;position:relative;z-index:1}
 
@@ -1782,7 +2066,7 @@ const CSS = `
 .maplibregl-ctrl-bottom-right{bottom:0}
 
 /* ── Region Card ── */
-.hd-region-card{display:flex;flex-direction:column;gap:10px;padding:10px 14px 12px;border-bottom:1px solid var(--bd)}
+.hd-region-card{display:flex;flex-direction:column;gap:10px;padding:6px 14px 10px;border-bottom:1px solid var(--bd)}
 .hd-rc-titlerow{display:flex;align-items:center;gap:8px;min-height:26px}
 .hd-rc-nameinput{flex:1;background:transparent;border:1px solid var(--or);border-radius:5px;padding:3px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--tx);outline:none;min-width:0}
 .hd-rc-rename{margin-left:auto;border:0;background:transparent;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--mut);padding:3px 7px;border-radius:5px;white-space:nowrap;flex-shrink:0}
@@ -1802,6 +2086,8 @@ const CSS = `
 .hd-rc-apply:not(:disabled):hover{background:var(--tx);color:#fff;border-color:var(--tx)}
 .hd-rc-apply:disabled{opacity:.4;cursor:default}
 .hd-rc-rangerow{display:flex;gap:10px}
+.hd-rc-datepair{display:flex;gap:4px}
+.hd-rc-datepair select{min-width:0;flex:1}
 .hd-rc-rangerow .hd-rc-field{flex:1}
 .hd-rc-note{font-size:10.5px;color:var(--mut);font-style:italic}
 .hd-analysis-slot{background:rgba(15,23,42,.03);border:1px solid var(--bd);border-radius:7px;padding:9px 11px;display:flex;flex-direction:column;gap:3px}
