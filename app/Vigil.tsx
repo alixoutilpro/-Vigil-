@@ -766,6 +766,7 @@ function getHotspotsForExport(ring: Ring, range: DateRange): { rows: ExportRow[]
 /* ────────────────────────────────────────────────────────────────────────── */
 
 const MAX_MAP_POINTS = 40000;
+const MAX_POINTS_PER_CELL_MONTH = 31;
 const monthKey = (y: number, m: number) => y * 12 + m;
 
 interface RangeHotspots { fc: HotCollection; source: "contract" | "simulated"; capped: boolean }
@@ -798,16 +799,24 @@ function buildRangeHotspots(sel: { region: RegionDef; ring: Ring }, range: DateR
     }
     const features: HotFeature[] = [];
     const frp = Math.round(region.frp * 10) / 10; // FRP is not in the contract: region mean per fire-day
-    const add = (a: { lat: number; lon: number; y: number; m: number }, sensor: HotFeature["properties"]["sensor"], days: number, dLon: number) => {
-      if (days <= 0) return;
-      features.push({
-        type: "Feature", geometry: { type: "Point", coordinates: [a.lon + dLon, a.lat] },
-        properties: { frp, sensor, days: Math.round(days * 10) / 10, date: `${a.y}-${String(a.m + 1).padStart(2, "0")}` },
-      });
+    // The contract only has fire-days per 0.1° cell and month (no positions): draw one point per
+    // fire-day (capped), spread deterministically inside the cell so density follows the counts.
+    const add = (a: { lat: number; lon: number; y: number; m: number }, id: string, sensor: HotFeature["properties"]["sensor"], days: number) => {
+      const n = Math.min(MAX_POINTS_PER_CELL_MONTH, Math.round(days));
+      if (n <= 0) return;
+      const rng = mulberry32(hashStr(`${id}:${sensor}`));
+      const date = `${a.y}-${String(a.m + 1).padStart(2, "0")}`;
+      for (let i = 0; i < n; i++) {
+        features.push({
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [a.lon + (rng() - 0.5) * 0.1, a.lat + (rng() - 0.5) * 0.1] },
+          properties: { frp, sensor, days: 1, date },
+        });
+      }
     };
-    for (const a of acc.values()) {
-      if (variant === "raw") { add(a, "MODIS", a.modis, -0.02); add(a, "VIIRS", a.viirs, 0.02); }
-      else add(a, "Harmonized", a.harm, 0);
+    for (const [id, a] of acc) {
+      if (variant === "raw") { add(a, id, "MODIS", a.modis); add(a, id, "VIIRS", a.viirs); }
+      else add(a, id, "Harmonized", a.harm);
     }
     return { fc: { type: "FeatureCollection", features }, source: "contract", capped: false };
   }
@@ -961,16 +970,20 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
   const fromKey = (k: number) => ({ y: Math.floor(k / 12), m: k % 12 });
   const clampKey = (k: number) => Math.min(maxKey, Math.max(minKey, k));
 
+  // Draft range: edited freely in the selects, only pushed to the map on "Apply".
+  const [draft, setDraftRange] = useState<DateRange>(range);
+  useEffect(() => { setDraftRange(range); }, [range]);
+  const dirty = key(draft.from) !== key(range.from) || key(draft.to) !== key(range.to);
+
   // Changing one bound never gets rejected: if it crosses the other bound, the other one follows.
   const setBound = (which: "from" | "to", part: "y" | "m", value: number) => {
-    const cur = range[which];
-    const next = fromKey(clampKey(key({ ...cur, [part]: value })));
-    let { from, to } = range;
+    const next = fromKey(clampKey(key({ ...draft[which], [part]: value })));
+    let { from, to } = draft;
     if (which === "from") { from = next; if (key(from) > key(to)) to = next; }
     else { to = next; if (key(to) < key(from)) from = next; }
-    setRangeErr("");
-    onRangeChange({ from, to });
+    setDraftRange({ from, to });
   };
+  const applyRange = () => { setRangeErr(""); onRangeChange(draft); };
 
   /* ── Export ── */
   const [exportErr, setExportErr] = useState("");
@@ -1075,11 +1088,11 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
             <label htmlFor="hd-range-from-m" className="hd-rc-fieldlabel">From</label>
             <div className="hd-rc-datepair">
               <select id="hd-range-from-m" className="hd-rc-monthinput" aria-label="From month"
-                value={range.from.m} onChange={(e) => setBound("from", "m", Number(e.target.value))}>
+                value={draft.from.m} onChange={(e) => setBound("from", "m", Number(e.target.value))}>
                 {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
               </select>
               <select id="hd-range-from-y" className="hd-rc-monthinput" aria-label="From year"
-                value={range.from.y} onChange={(e) => setBound("from", "y", Number(e.target.value))}>
+                value={draft.from.y} onChange={(e) => setBound("from", "y", Number(e.target.value))}>
                 {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
               </select>
             </div>
@@ -1088,16 +1101,19 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
             <label htmlFor="hd-range-to-m" className="hd-rc-fieldlabel">To</label>
             <div className="hd-rc-datepair">
               <select id="hd-range-to-m" className="hd-rc-monthinput" aria-label="To month"
-                value={range.to.m} onChange={(e) => setBound("to", "m", Number(e.target.value))}>
+                value={draft.to.m} onChange={(e) => setBound("to", "m", Number(e.target.value))}>
                 {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
               </select>
               <select id="hd-range-to-y" className="hd-rc-monthinput" aria-label="To year"
-                value={range.to.y} onChange={(e) => setBound("to", "y", Number(e.target.value))}>
+                value={draft.to.y} onChange={(e) => setBound("to", "y", Number(e.target.value))}>
                 {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
               </select>
             </div>
           </div>
         </div>
+        <button className="hd-rc-apply" aria-label="Apply study period to map" disabled={!dirty} onClick={applyRange}>
+          Apply
+        </button>
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
       </div>
 
@@ -1344,7 +1360,7 @@ export default function Vigil() {
         const [lng, lat] = (f.geometry as unknown as { coordinates: [number, number] }).coordinates;
         new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
           .setLngLat([lng, lat])
-          .setHTML(`<table>${p.days != null ? `<tr><td>Fire-days</td><td>${p.days}</td></tr>` : `<tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr>`}<tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
+          .setHTML(`<table>${p.days != null ? `<tr><td>Fire-day</td><td>${p.sensor} · cell data.json</td></tr>` : `<tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr>`}<tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
           .addTo(map);
       });
 
@@ -1606,7 +1622,7 @@ export default function Vigil() {
                 {`${selRange.from.y}-${String(selRange.from.m + 1).padStart(2, "0")} → ${selRange.to.y}-${String(selRange.to.m + 1).padStart(2, "0")}`}
               </b>
               <span className="hd-mono">
-                {fmtInt(hotspots.features.length)} {rangeHot.source === "contract" ? "cell-months (data.json)" : "hotspots (simulated)"}
+                {fmtInt(hotspots.features.length)} {rangeHot.source === "contract" ? "fire-days (data.json)" : "hotspots (simulated)"}
                 {rangeHot.capped ? ` · sampled to ${fmtInt(MAX_MAP_POINTS)}` : ""}
               </span>
             </>
