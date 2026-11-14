@@ -652,7 +652,8 @@ function getClusters(): Cluster[] {
 interface HotFeature {
   type: "Feature";
   geometry: { type: "Point"; coordinates: [number, number] };
-  properties: { frp: number; sensor: "MODIS" | "VIIRS"; date: string };
+  /** `days` is only set on points derived from data/data.json (fire-days in the cell for that month). */
+  properties: { frp: number; sensor: "MODIS" | "VIIRS" | "Harmonized"; date: string; days?: number };
 }
 type HotCollection = { type: "FeatureCollection"; features: HotFeature[] };
 
@@ -758,6 +759,70 @@ function getHotspotsForExport(ring: Ring, range: DateRange): { rows: ExportRow[]
     }
   }
   return { rows, count: rows.length };
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Map points for a selected region + study period                            */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const MAX_MAP_POINTS = 40000;
+const monthKey = (y: number, m: number) => y * 12 + m;
+
+interface RangeHotspots { fc: HotCollection; source: "contract" | "simulated"; capped: boolean }
+
+/**
+ * Points shown on the map for the Region card (selection + From/To study period).
+ * - If data/data.json has cells inside the region bbox (same test as regionData), one point per
+ *   cell and month is drawn from the contract's fire-days (raw: MODIS / VIIRS, harmonized: one point).
+ * - Otherwise falls back to the synthetic generator over the period, like regionData does.
+ */
+function buildRangeHotspots(sel: { region: RegionDef; ring: Ring }, range: DateRange, variant: Variant): RangeHotspots {
+  const { region, ring } = sel;
+  const [la0, la1, lo0, lo1] = region.bbox;
+  const kLo = monthKey(range.from.y, range.from.m), kHi = monthKey(range.to.y, range.to.m);
+
+  const inBbox = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
+  if (inBbox.length) {
+    const acc = new Map<string, { lat: number; lon: number; y: number; m: number; modis: number; viirs: number; harm: number }>();
+    for (const c of inBbox) {
+      if (!pip(c.lon, c.lat, ring)) continue;
+      const k = isoWeekMonth(c.iso_year, c.iso_week);
+      const key = monthKey(k.y, k.m);
+      if (key < kLo || key > kHi) continue;
+      const id = `${c.cell_id}:${key}`;
+      let a = acc.get(id);
+      if (!a) acc.set(id, (a = { lat: c.lat, lon: c.lon, y: k.y, m: k.m, modis: 0, viirs: 0, harm: 0 }));
+      a.modis += c.modis_fire_days ?? 0;
+      a.viirs += c.viirs_fire_days ?? 0;
+      a.harm += c.harmonized_fire_days;
+    }
+    const features: HotFeature[] = [];
+    const frp = Math.round(region.frp * 10) / 10; // FRP is not in the contract: region mean per fire-day
+    const add = (a: { lat: number; lon: number; y: number; m: number }, sensor: HotFeature["properties"]["sensor"], days: number, dLon: number) => {
+      if (days <= 0) return;
+      features.push({
+        type: "Feature", geometry: { type: "Point", coordinates: [a.lon + dLon, a.lat] },
+        properties: { frp, sensor, days: Math.round(days * 10) / 10, date: `${a.y}-${String(a.m + 1).padStart(2, "0")}` },
+      });
+    };
+    for (const a of acc.values()) {
+      if (variant === "raw") { add(a, "MODIS", a.modis, -0.02); add(a, "VIIRS", a.viirs, 0.02); }
+      else add(a, "Harmonized", a.harm, 0);
+    }
+    return { fc: { type: "FeatureCollection", features }, source: "contract", capped: false };
+  }
+
+  const features: HotFeature[] = [];
+  for (let key = kLo; key <= kHi; key++) {
+    const y = Math.floor(key / 12), m = key % 12;
+    for (const f of buildHotspots(y, m, variant).features) {
+      const [lon, lat] = f.geometry.coordinates;
+      if (lat >= la0 && lat <= la1 && lon >= lo0 && lon <= lo1 && pip(lon, lat, ring)) features.push(f);
+    }
+  }
+  const capped = features.length > MAX_MAP_POINTS;
+  const kept = capped ? features.filter((_, i) => i % Math.ceil(features.length / MAX_MAP_POINTS) === 0) : features;
+  return { fc: { type: "FeatureCollection", features: kept }, source: "simulated", capped };
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -1128,7 +1193,15 @@ export default function Vigil() {
     return all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1;
   }, [vals]);
 
-  const hotspots = useMemo(() => buildHotspots(date.y, date.m, mode), [date, mode]);
+  // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
+  const rangeHot = useMemo(
+    () => (selection ? buildRangeHotspots(selection, selRange, mode) : null),
+    [selection, selRange, mode],
+  );
+  const hotspots = useMemo(
+    () => rangeHot?.fc ?? buildHotspots(date.y, date.m, mode),
+    [rangeHot, date, mode],
+  );
 
   /* ── Map: push GeoJSON into sources ── */
   const pushSources = useCallback(() => {
@@ -1268,11 +1341,11 @@ export default function Vigil() {
       map.on("click", "hotspots", (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const f = e.features[0];
-        const p = f.properties as { frp: number; sensor: string; date: string };
+        const p = f.properties as { frp: number; sensor: string; date: string; days?: number };
         const [lng, lat] = (f.geometry as unknown as { coordinates: [number, number] }).coordinates;
         new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
           .setLngLat([lng, lat])
-          .setHTML(`<table><tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr><tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
+          .setHTML(`<table>${p.days != null ? `<tr><td>Fire-days</td><td>${p.days}</td></tr>` : `<tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr>`}<tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
           .addTo(map);
       });
 
@@ -1528,11 +1601,25 @@ export default function Vigil() {
       {/* Date + legend */}
       <div className="hd-datechip">
         <div className="hd-date-row">
-          <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
-          <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
-          <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
-          <span className="hd-mono">{fmtInt(hotspots.features.length)} hotspots</span>
-          {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
+          {rangeHot ? (
+            <>
+              <b className="hd-mono">
+                {`${selRange.from.y}-${String(selRange.from.m + 1).padStart(2, "0")} → ${selRange.to.y}-${String(selRange.to.m + 1).padStart(2, "0")}`}
+              </b>
+              <span className="hd-mono">
+                {fmtInt(hotspots.features.length)} {rangeHot.source === "contract" ? "cell-months (data.json)" : "hotspots (simulated)"}
+                {rangeHot.capped ? ` · sampled to ${fmtInt(MAX_MAP_POINTS)}` : ""}
+              </span>
+            </>
+          ) : (
+            <>
+              <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
+              <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
+              <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
+              <span className="hd-mono">{fmtInt(hotspots.features.length)} hotspots</span>
+              {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
+            </>
+          )}
         </div>
         <div className="hd-frp-legend">
           <span>FRP MW</span>
