@@ -863,6 +863,23 @@ const SAT_STYLE: StyleSpecification = {
 const HEAT_STOPS: [number, [number, number, number]][] = [
   [0, [254, 243, 199]], [0.25, [252, 211, 77]], [0.5, [251, 146, 60]], [0.72, [234, 88, 12]], [0.88, [220, 38, 38]], [1, [127, 29, 29]],
 ];
+/**
+ * Absolute calendar scale, shared by every region: the 98th percentile of monthly totals over all
+ * preset regions (per data series). A cell is dark when the month is strong in absolute terms,
+ * not just relative to its own region.
+ */
+const HEAT_REF: Partial<Record<Variant, number>> = {};
+function absoluteHeatMax(variant: Variant): number {
+  const cached = HEAT_REF[variant];
+  if (cached) return cached;
+  const all: number[] = [];
+  for (const r of REGIONS) {
+    for (const row of monthlyValues(regionData(r), variant, "count", "all")) for (const c of row) if (c) all.push(c.total);
+  }
+  all.sort((a, b) => a - b);
+  return (HEAT_REF[variant] = all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1);
+}
+
 function heatColor(t: number): string {
   t = clamp(t, 0, 1);
   for (let i = 1; i < HEAT_STOPS.length; i++) {
@@ -1203,12 +1220,7 @@ export default function Vigil() {
   const vals = mode === "raw" ? rawVals : harmVals;
   const rawAnnual = useMemo(() => annualSeries(rawVals), [rawVals]);
   const harmAnnual = useMemo(() => annualSeries(harmVals), [harmVals]);
-  const heatMax = useMemo(() => {
-    const all: number[] = [];
-    vals.forEach((r) => r.forEach((c) => c && all.push(c.total)));
-    all.sort((a, b) => a - b);
-    return all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1;
-  }, [vals]);
+  const heatMax = useMemo(() => absoluteHeatMax(mode), [mode]);
 
   const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while points rebuild
   // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
@@ -1526,6 +1538,10 @@ export default function Vigil() {
           })}
         </React.Fragment>
       ))}
+      <div className="hd-heat-legend">
+        <span>0</span><i />
+        <span>≥ {fmtInt(Math.round(heatMax))} fire-days / month · same scale for every region</span>
+      </div>
     </div>
   );
 
@@ -1854,6 +1870,8 @@ const CSS = `
 .hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
+.hd-heat-legend{grid-column:1 / -1;display:flex;align-items:center;gap:6px;margin-top:4px;font-size:9.5px;color:var(--mut)}
+.hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:linear-gradient(90deg,#e8edf3,rgb(254,243,199) 4%,rgb(252,211,77) 25%,rgb(251,146,60) 50%,rgb(234,88,12) 72%,rgb(220,38,38) 88%,rgb(127,29,29))}
 .hd-cell.out{opacity:.35}
 .hd-cell.sel{outline:1.5px solid var(--tx);outline-offset:0;position:relative;z-index:1}
 .hd-cell:hover{outline:1px solid var(--tx);outline-offset:0;position:relative;z-index:1}
