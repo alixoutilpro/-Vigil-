@@ -442,7 +442,7 @@ function CalTip({ tip, g, metrique, mz, bandOf, meds, annMed, smallZone, frpBand
 
 /* ── Annual series ────────────────────────────────────────────────────── */
 
-const tipStyle: React.CSSProperties = { fontSize: 11, background: "rgba(15,23,42,.94)", border: 0, color: "#f8fafc", borderRadius: 6, padding: "6px 9px" };
+const tipStyle: React.CSSProperties = { fontSize: 11, background: "#fff", border: "1px solid #e2e8f0", color: "#0f172a", borderRadius: 6, boxShadow: "0 8px 24px rgba(15,23,42,.25)", padding: "6px 9px" };
 
 function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; index: IndexV2 }) {
   const u = unitOf(metrique);
@@ -489,7 +489,7 @@ function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; in
                   {d.full !== null && <div>Total {fmtF(d.full)} {u}</div>}
                   {d.part !== null && <div>Partial ({d.span}) {fmtF(d.part)} {u} — not extrapolated</div>}
                   {d.full === null && d.part === null && <div>No data</div>}
-                  {ok && <div style={{ color: "#94a3b8" }}>median {fmtF(med)} · P10–P90 {fmtF(p10)}–{fmtF(p90)}</div>}
+                  {ok && <div style={{ color: "#475569" }}>median {fmtF(med)} · P10–P90 {fmtF(p10)}–{fmtF(p90)}</div>}
                 </div>
               );
             }} />
@@ -537,9 +537,9 @@ function FrpBlock({ grids, focusY }: { grids: Grids; focusY: number }) {
               <div style={tipStyle}>
                 <div style={{ fontWeight: 700 }}>{d.name}</div>
                 <div>median {d[med] !== null ? fmt(d[med] as number) : "—"} {unit}</div>
-                <div style={{ color: "#94a3b8" }}>Q1–Q3 {r ? `${fmt(r[0])}–${fmt(r[1])}` : "—"}</div>
+                <div style={{ color: "#475569" }}>Q1–Q3 {r ? `${fmt(r[0])}–${fmt(r[1])}` : "—"}</div>
                 <div>{focusY}: {d[foc] !== null ? fmt(d[foc] as number) : "—"} {unit}</div>
-                {med === "intMed" && <div style={{ color: "#94a3b8" }}>n={d.intN} yrs (months with ≥ 1 detection)</div>}
+                {med === "intMed" && <div style={{ color: "#475569" }}>n={d.intN} yrs (months with ≥ 1 detection)</div>}
               </div>
             );
           }} />
