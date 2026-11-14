@@ -20,7 +20,6 @@ import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEven
 type Variant = "raw" | "harm";
 type Metric = "count" | "frp";
 type FireType = "all" | "wild" | "agri";
-type V3 = [number, number, number];
 type Ring = [number, number][];
 
 interface AnomalyDef {
@@ -97,12 +96,14 @@ const NY = Y1 - Y0 + 1;
 const LAST_MONTH_Y1 = 9; // data through Oct 2026
 const FIRST_MONTH_Y0 = 10; // MODIS active fire starts Nov 2000
 const VIIRS_START = { y: 2012, m: 1 }; // Feb 2012
-const R_NOM = 2.5; // nominal VIIRS(375m)/MODIS(1km) pixel-count ratio used for harmonization
-const VFRP_BIAS = 1.12; // nominal VIIRS FRP sensitivity bias
+/** Backend switch (VIGIL-K1): harmonized values are MODIS Aqua as observed before Nov 2020, converted VIIRS from then on. */
+const SWITCH = { y: 2020, m: 10 }; // Nov 2020
+/** Reference period of the historical median (E7): complete Aqua years, current year excluded. */
+const BASE_Y0 = 2003, BASE_Y1 = 2025;
+const isViirsMonth = (y: number, m: number) => y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
+const isConvertedMonth = (y: number, m: number) => y > SWITCH.y || (y === SWITCH.y && m >= SWITCH.m);
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-const D2R = Math.PI / 180;
 
 export const REGIONS: RegionDef[] = [
   {
@@ -338,17 +339,12 @@ function fmtCompact(n: number): string {
   if (a >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(Math.round(n));
 }
-const unit = (m: Metric) => (m === "count" ? "px" : "MW");
+const unit = (m: Metric) => (m === "count" ? "hotspots" : "MW");
 
-function lonLatVec(lon: number, lat: number): V3 {
-  const l = lon * D2R;
-  const p = lat * D2R;
-  return [Math.cos(p) * Math.sin(l), Math.sin(p), Math.cos(p) * Math.cos(l)];
-}
-function angDist(lon1: number, lat1: number, lon2: number, lat2: number): number {
-  const a = lonLatVec(lon1, lat1);
-  const b = lonLatVec(lon2, lat2);
-  return Math.acos(clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1, 1)) / D2R;
+/** Where a monthly value comes from (shown instead of a sensor split, which would be wrong once harmonized). */
+function provenance(y: number, m: number, variant: Variant): string {
+  if (variant === "harm") return isConvertedMonth(y, m) ? "VIIRS converted to MODIS-Aqua equivalent (VIGIL-K1)" : "MODIS Aqua, as observed";
+  return isViirsMonth(y, m) ? "VIIRS (S-NPP, NOAA-20 on S-NPP gaps)" : "MODIS Aqua";
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -432,7 +428,8 @@ export function overlapsCoverage(b: [number, number, number, number]): boolean {
 /** True when the bbox lies entirely inside the area covered by data.json. */
 export function insideCoverage(b: [number, number, number, number]): boolean {
   const cv = coverage();
-  return !!cv && b[0] >= cv.la0 && b[1] <= cv.la1 && b[2] >= cv.lo0 && b[3] <= cv.lo1;
+  const t = CELL_DEG / 2; // half a cell of tolerance: a country box that ends inside the edge cells is covered
+  return !!cv && b[0] >= cv.la0 - t && b[1] <= cv.la1 + t && b[2] >= cv.lo0 - t && b[3] <= cv.lo1 + t;
 }
 
 /** Rows of data.json whose cell centre is inside the region (bbox, then drawn polygon if any). */
@@ -468,38 +465,29 @@ function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
     row.map((a, m): Cell | null => {
       const y = Y0 + yi;
       if (y < first.y || (y === first.y && m < first.m) || y > last.y || (y === last.y && m > last.m)) return null;
-      const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
+      const hasV = isViirsMonth(y, m);
       return {
         y, m, modis: a.modis, viirs: a.viirs,
-        // FRP is not part of the contract: approximate from the region's mean FRP per hotspot.
-        mFrp: Math.round(a.modis * r.frp), vFrp: Math.round(a.viirs * r.frp * VFRP_BIAS),
+        // FRP is not in data.json: never shown from it (the real harmonized FRP comes with the v2 data files).
+        mFrp: 0, vFrp: 0,
         mEff: 1, hasV, wild: a.harm > 0 ? a.wild / a.harm : r.wild, harm: a.harm,
       };
     }));
 }
 
 /** Value of a cell for a given harmonization variant / metric / fire-type filter. */
+/**
+ * Value of a month for a data series.
+ * - harm: the backend's harmonized count (MODIS-Aqua equivalent, VIGIL-K1) — no conversion in the browser.
+ * - raw: the record as each era saw it, ONE sensor at a time (MODIS Aqua before Feb 2012, VIIRS after):
+ *   adding MODIS + VIIRS would count the same fires twice.
+ */
 export function cellStats(c: Cell, variant: Variant, metric: Metric, type: FireType): CellVal {
-  let m = metric === "count" ? c.modis : c.mFrp;
-  let v = metric === "count" ? c.viirs : c.vFrp;
-  if (variant === "harm" && metric === "count" && c.harm !== undefined) {
-    // Contract data: harmonized_fire_days already MODIS-equivalent; sensors shown as observed.
-    const f = type === "all" ? 1 : type === "wild" ? c.wild : 1 - c.wild;
-    return { total: c.harm * f, modis: m * f, viirs: v * f };
-  }
-  if (variant === "harm") {
-    m = m / c.mEff;
-    v = metric === "count" ? v / R_NOM : v / VFRP_BIAS;
-  }
-  let total = variant === "raw" ? m + v : c.hasV ? (m + v) / 2 : m;
-  let f = 1;
-  if (type !== "all") {
-    const w =
-      metric === "count" ? c.wild : (c.wild * 1.3) / (c.wild * 1.3 + (1 - c.wild) * 0.7);
-    f = type === "wild" ? w : 1 - w;
-  }
-  total *= f;
-  return { total, modis: m * f, viirs: v * f };
+  const m = metric === "count" ? c.modis : c.mFrp;
+  const v = metric === "count" ? c.viirs : c.vFrp;
+  const f = type === "all" ? 1 : type === "wild" ? c.wild : 1 - c.wild;
+  const total = variant === "harm" ? (metric === "count" ? c.harm ?? m : 0) : c.hasV ? v : m;
+  return { total: total * f, modis: m * f, viirs: v * f };
 }
 
 function monthlyValues(data: (Cell | null)[][], variant: Variant, metric: Metric, type: FireType): (CellVal | null)[][] {
@@ -527,91 +515,51 @@ function annualSeries(vals: (CellVal | null)[][]): AnnualPt[] {
   });
 }
 
-/* ── Season metrics ───────────────────────────────────────────────────────── */
+/* ── Comparison with the historical median (E7) ──────────────────────────── */
 
-const MID_DOY = DAYS.map((d, i) => DAYS.slice(0, i).reduce((a, b) => a + b, 0) + d / 2);
+/** Hyndman & Fan (1996) type-8 quantile (median-unbiased, as in the backend method), xs sorted ascending. */
+function quantile8(xs: number[], p: number): number {
+  const n = xs.length;
+  if (!n) return NaN;
+  const h = (n + 1 / 3) * p + 1 / 3; // 1-based position
+  const j = Math.floor(h), g = h - j;
+  if (j < 1) return xs[0];
+  if (j >= n) return xs[n - 1];
+  return xs[j - 1] + g * (xs[j] - xs[j - 1]);
+}
 
-function dailyCurve(v: number[]): number[] {
-  const out: number[] = new Array(365);
-  for (let d = 0; d < 365; d++) {
-    let a: number, ma: number, mb: number;
-    if (d < MID_DOY[0]) {
-      a = 11; ma = MID_DOY[11] - 365; mb = MID_DOY[0];
-    } else {
-      a = 0;
-      for (let i = 0; i < 12; i++) if (MID_DOY[i] <= d) a = i;
-      ma = MID_DOY[a];
-      mb = a === 11 ? MID_DOY[0] + 365 : MID_DOY[a + 1];
-    }
-    const b = (a + 1) % 12;
-    const f = (d - ma) / (mb - ma);
-    out[d] = v[a] * (1 - f) + v[b] * f;
+const CLASSES5 = ["much below normal", "below normal", "near normal", "above normal", "much above normal"] as const;
+
+export interface MedianCompare {
+  y: number; m: number; value: number; median: number; p10: number; p90: number;
+  pctMedian: number | null; rank: number; nYears: number; percentile: number; cls: number;
+}
+
+/**
+ * A month against the same calendar month of the reference years (BASE_Y0..BASE_Y1, the month's own year
+ * excluded): median, P10/P90, % of median, rank (1 = most active), mid-rank percentile, 5-level class
+ * (< P10 | P10-P33 | P33-P67 | P67-P90 | > P90). Computed on the series given (use the harmonized one).
+ */
+export function compareToMedian(vals: (CellVal | null)[][], y: number, m: number): MedianCompare | null {
+  const cur = vals[y - Y0]?.[m];
+  if (!cur) return null;
+  const base: number[] = [];
+  for (let by = BASE_Y0; by <= BASE_Y1; by++) {
+    if (by === y) continue;
+    const c = vals[by - Y0]?.[m];
+    if (c) base.push(c.total);
   }
-  return out;
-}
-
-function climatology(vals: (CellVal | null)[][], y0: number, y1: number): number[] {
-  return Array.from({ length: 12 }, (_, m) => {
-    let s = 0, n = 0;
-    for (let y = y0; y <= y1; y++) {
-      const c = vals[y - Y0][m];
-      if (c) { s += c.total; n++; }
-    }
-    return n ? s / n : 0;
-  });
-}
-
-export interface SeasonKpi {
-  extensionDays: number;
-  onsetWeeks: number;
-  lenEarly: number;
-  lenLate: number;
-  saturated: boolean;
-}
-export function seasonKpi(vals: (CellVal | null)[][]): SeasonKpi {
-  const early = dailyCurve(climatology(vals, 2000, 2004));
-  const late = dailyCurve(climatology(vals, 2021, 2025));
-  let minDay = 0;
-  for (let i = 1; i < 365; i++) if (early[i] < early[minDay]) minDay = i;
-  const mn = Math.min(...early);
-  const mx = Math.max(...early);
-  const thr = mn + 0.3 * (mx - mn);
-  const stat = (d: number[]) => {
-    let len = 0, onset = -1;
-    for (let i = 0; i < 365; i++) {
-      if (d[(minDay + i) % 365] >= thr) { len++; if (onset < 0) onset = i; }
-    }
-    return { len, onset: onset < 0 ? 0 : onset };
-  };
-  const e = stat(early);
-  const l = stat(late);
+  if (base.length < 10) return null;
+  base.sort((a, b) => a - b);
+  const x = cur.total, q = (p: number) => quantile8(base, p);
+  const median = q(0.5), p10 = q(0.1), p33 = q(1 / 3), p67 = q(2 / 3), p90 = q(0.9);
+  const below = base.filter((v) => v < x).length, equal = base.filter((v) => v === x).length;
+  const cls = x < p10 ? 0 : x < p33 ? 1 : x <= p67 ? 2 : x <= p90 ? 3 : 4;
   return {
-    extensionDays: l.len - e.len,
-    onsetWeeks: (e.onset - l.onset) / 7,
-    lenEarly: e.len, lenLate: l.len,
-    saturated: l.len >= 360,
+    y, m, value: x, median, p10, p90, pctMedian: median > 0 ? (100 * x) / median : null,
+    rank: 1 + base.filter((v) => v > x).length, nYears: base.length + 1,
+    percentile: (100 * (below + 0.5 * equal)) / base.length, cls,
   };
-}
-
-export interface AnomalyResult { z: number; y: number; m: number; value: number; mean: number; sd: number }
-export function anomalyScan(vals: (CellVal | null)[][]): AnomalyResult | null {
-  let best: AnomalyResult | null = null;
-  for (let k = 11; k >= 0; k--) {
-    let y = Y1, m = LAST_MONTH_Y1 - k;
-    if (m < 0) { m += 12; y -= 1; }
-    const cur = vals[y - Y0][m];
-    if (!cur) continue;
-    const base: number[] = [];
-    for (let by = 2000; by <= 2010; by++) { const c = vals[by - Y0][m]; if (c) base.push(c.total); }
-    if (base.length < 5) continue;
-    const mean = base.reduce((a, b) => a + b, 0) / base.length;
-    const sd0 = Math.sqrt(base.reduce((a, b) => a + (b - mean) ** 2, 0) / (base.length - 1));
-    const sd = Math.max(sd0, mean * 0.3);
-    if (sd <= 0) continue;
-    const z = (cur.total - mean) / sd;
-    if (!best || Math.abs(z) > Math.abs(best.z)) best = { z, y, m, value: cur.total, mean, sd };
-  }
-  return best;
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -667,21 +615,23 @@ const ym = (k: number) => `${Math.floor(k / 12)}-${String((k % 12) + 1).padStart
  * exactly the calendar total for the same region, period and mode.
  */
 function contractPoints(bbox: [number, number, number, number] | null, ring: Ring | undefined, kLo: number, kHi: number, variant: Variant): HotCollection {
-  const acc = new Map<string, { lat: number; lon: number; modis: number; viirs: number; harm: number }>();
+  const acc = new Map<string, { lat: number; lon: number; modis: number; viirs: number; harm: number; raw: number }>();
   for (const c of contractRows(bbox, ring)) {
     const k = isoWeekMonth(c.iso_year, c.iso_week);
     const key = monthKey(k.y, k.m);
     if (key < kLo || key > kHi) continue;
     let a = acc.get(c.cell_id);
-    if (!a) acc.set(c.cell_id, (a = { lat: c.lat, lon: c.lon, modis: 0, viirs: 0, harm: 0 }));
+    if (!a) acc.set(c.cell_id, (a = { lat: c.lat, lon: c.lon, modis: 0, viirs: 0, harm: 0, raw: 0 }));
     a.modis += c.modis_fire_days ?? 0;
     a.viirs += c.viirs_fire_days ?? 0;
     a.harm += c.harmonized_fire_days;
+    // raw record = one sensor per era (same rule as cellStats): never MODIS + VIIRS added together
+    a.raw += isViirsMonth(k.y, k.m) ? c.viirs_fire_days ?? 0 : c.modis_fire_days ?? 0;
   }
   const period = kLo === kHi ? ym(kLo) : `${ym(kLo)} → ${ym(kHi)}`;
   const features: HotFeature[] = [];
   for (const [cell, a] of acc) {
-    const n = variant === "raw" ? a.modis + a.viirs : a.harm;
+    const n = variant === "raw" ? a.raw : a.harm;
     if (n <= 0) continue;
     features.push({
       type: "Feature",
@@ -1510,9 +1460,41 @@ export default function Vigil() {
 
   /* ── Heatmap tooltip data ── */
   const tipCell = tip ? data[tip.yi][tip.m] : null;
-  const tipStats = tipCell ? { count: cellStats(tipCell, mode, "count", "all"), frp: cellStats(tipCell, mode, "frp", "all") } : null;
-  const sensorText = (c: Cell, s: { modis: number; viirs: number }) =>
-    !c.hasV ? "MODIS only" : `MODIS ${Math.round((s.modis / (s.modis + s.viirs || 1)) * 100)}% / VIIRS ${Math.round((s.viirs / (s.modis + s.viirs || 1)) * 100)}%`;
+  const tipStats = tipCell ? { count: cellStats(tipCell, mode, "count", "all") } : null;
+
+  /* ── E7: focus month vs the historical median (always on the harmonized series, the only comparable one) ── */
+  const focus = selection && monthKey(selRange.from.y, selRange.from.m) === monthKey(selRange.to.y, selRange.to.m) ? selRange.from : LATEST;
+  const med = useMemo(() => compareToMedian(harmVals, focus.y, focus.m), [harmVals, focus.y, focus.m]);
+  const CLASS_COLORS = ["#2166ac", "#92c5de", "#f7f7f7", "#f4a582", "#b2182b"]; // RdBu, colour-blind safe
+
+  /* ── E8: download the calendar as a PNG image ── */
+  const downloadCalendarPng = () => {
+    const cw = 22, ch = 13, left = 44, top = 46, rows = vals.length;
+    const cv = document.createElement("canvas");
+    cv.width = left + 12 * cw + 16; cv.height = top + rows * ch + 40;
+    const g = cv.getContext("2d");
+    if (!g) return;
+    g.fillStyle = "#ffffff"; g.fillRect(0, 0, cv.width, cv.height);
+    g.fillStyle = "#0f172a"; g.font = "bold 13px sans-serif";
+    g.fillText(`Vigil · ${selectionName} · ${mode === "harm" ? "harmonized hotspots (MODIS-Aqua equivalent)" : "raw hotspots"}`, 8, 18);
+    g.font = "10px sans-serif"; g.fillStyle = "#64748b";
+    g.fillText("NASA FIRMS MODIS & VIIRS · VIGIL-K1 · hotspots per month", 8, 32);
+    MONTHS.forEach((mn, i) => g.fillText(mn[0], left + i * cw + 8, top - 4));
+    vals.forEach((row, yi) => {
+      g.fillStyle = "#64748b";
+      g.fillText(String(Y0 + yi), 6, top + yi * ch + 10);
+      row.forEach((c, mi) => {
+        g.fillStyle = !c ? "#e2e8f0" : c.total < heatMax * 0.015 ? "#e8edf3" : heatColor(Math.pow(c.total / heatMax, 0.62));
+        g.fillRect(left + mi * cw, top + yi * ch, cw - 1, ch - 1);
+      });
+    });
+    g.fillStyle = "#64748b";
+    g.fillText(`Scale: 0 → ≥ ${fmtInt(Math.round(heatMax))} hotspots / month (same for every region). Grey = no data.`, 8, top + rows * ch + 18);
+    const a = document.createElement("a");
+    a.href = cv.toDataURL("image/png");
+    a.download = `vigil_${selectionName.replace(/[^a-z0-9]/gi, "_")}_calendar_${mode}.png`;
+    a.click();
+  };
 
   /* ── Calendar (year × month heatmap), shared by the panel and the split view ── */
   const renderCalendar = (large: boolean) => (
@@ -1689,7 +1671,7 @@ export default function Vigil() {
       {/* Fire stripes: one stripe per year, top right of the globe */}
       {selection && covered && (
         <div className="hd-stripes-card">
-          <div className="hd-stripes" role="img" aria-label={`Fire stripes ${Y0}–${Y1} for ${selectionName}: one stripe per year, blue = fewer fires, red = more fires than the average year`}>
+          <div className="hd-stripes" role="img" aria-label={`Fire stripes ${Y0}–${Y1} for ${selectionName}: one stripe per year, blue = fewer hotspots, red = more hotspots than the average year`}>
             {stripes.map((c, yi) => (
               <i
                 key={yi}
@@ -1699,7 +1681,7 @@ export default function Vigil() {
               />
             ))}
           </div>
-          <div className="hd-stripes-axis"><span>{Y0}</span><span>fires / year</span><span>{Y1}</span></div>
+          <div className="hd-stripes-axis"><span>{Y0}</span><span>hotspots / year</span><span>{Y1}</span></div>
         </div>
       )}
 
@@ -1743,9 +1725,28 @@ export default function Vigil() {
 
           {panelOpen && (
             <div className="hd-panel-body">
-              <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw" }, { v: "harm", t: "Harmonized 1km" }]} />
+              <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw (one sensor per era)" }, { v: "harm", t: "Harmonized (MODIS-eq.)" }]} />
+
+              {med && (
+                <div className="hd-median" aria-live="polite">
+                  <div className="hd-median-head">
+                    <b className="hd-mono">{MONTHS[med.m]} {med.y}</b> vs median {BASE_Y0}–{BASE_Y1}
+                    <span className="hd-median-cls" style={{ background: CLASS_COLORS[med.cls], color: med.cls === 0 || med.cls === 4 ? "#fff" : "#0f172a" }}>
+                      {CLASSES5[med.cls]}
+                    </span>
+                  </div>
+                  <div className="hd-median-row hd-mono">
+                    {fmtInt(med.value)} hotspots · median {fmtInt(med.median)}
+                    {med.pctMedian !== null ? ` · ${Math.round(med.pctMedian)} % of median` : ""}
+                  </div>
+                  <div className="hd-median-row hd-mono dim">
+                    rank {med.rank} / {med.nYears} · usual range (P10–P90) {fmtInt(med.p10)}–{fmtInt(med.p90)} · harmonized series
+                  </div>
+                </div>
+              )}
 
               {renderCalendar(false)}
+              <button className="hd-rc-apply" onClick={downloadCalendarPng} aria-label="Download the calendar as a PNG image">Download PNG</button>
 
               <div className="hd-chart-wrap">
                 <svg viewBox={`0 0 ${W} ${H}`} className="hd-chart" role="img" aria-label="Annual series, raw versus harmonized">
@@ -1760,6 +1761,10 @@ export default function Vigil() {
                   <text x={xAt(2012 - Y0) - 4} y={mt + 8} textAnchor="end" className="hd-annot">2012</text>
                   <path d={pathOf(rawLine)} fill="none" stroke="#dc2626" strokeWidth={mode === "raw" ? 2.4 : 1.4} strokeDasharray="5 3" opacity={mode === "raw" ? 1 : 0.4} strokeLinejoin="round" />
                   <path d={pathOf(harmLine)} fill="none" stroke="#ea580c" strokeWidth={mode === "harm" ? 2.4 : 1.4} opacity={mode === "harm" ? 1 : 0.45} strokeLinejoin="round" />
+                  {/* partial years (data start / current year) are extrapolated: hollow markers, never plain points */}
+                  {annual.map((p, i) => (p.est && p.value !== null
+                    ? <circle key={`est${i}`} cx={xAt(i)} cy={yAt(p.value)} r={3} fill="#fff" stroke="#0f172a" strokeWidth={1.2}><title>{`${Y0 + i}: partial year, annual total estimated`}</title></circle>
+                    : null))}
                   {hoverYear !== null && (
                     <g>
                       <line x1={xAt(hoverYear)} x2={xAt(hoverYear)} y1={mt} y2={mt + ph} stroke="#0f172a" opacity={0.25} />
@@ -1772,6 +1777,7 @@ export default function Vigil() {
                 <div className="hd-chart-legend">
                   <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#dc2626" strokeWidth="2.4" strokeDasharray="4 3" /></svg>Raw</span>
                   <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>Harmonized</span>
+                  <span><svg width="10" height="10"><circle cx="5" cy="5" r="3" fill="#fff" stroke="#0f172a" strokeWidth="1.2" /></svg>partial year (est.)</span>
                   {hoverYear !== null && (
                     <span className="hd-mono hd-hover-read">
                       {Y0 + hoverYear}: {rawLine[hoverYear] != null ? fmtCompact(rawLine[hoverYear]!) : "—"} / {harmLine[hoverYear] != null ? fmtCompact(harmLine[hoverYear]!) : "—"} {unit(metric)}
@@ -1790,7 +1796,7 @@ export default function Vigil() {
           <div className="hd-split-head">
             <span className="hd-word-sm">Vigil</span>
             <span className="hd-mono hd-name">{region.name}</span>
-            <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw" }, { v: "harm", t: "Harmonized 1km" }]} />
+            <Seg<Variant> label="Data series" value={mode} onChange={setMode} options={[{ v: "raw", t: "Raw (one sensor per era)" }, { v: "harm", t: "Harmonized (MODIS-eq.)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
               <CollapseIcon />
             </button>
@@ -1810,11 +1816,10 @@ export default function Vigil() {
           <div className="hd-tip-title">{Y0 + tip.yi}-{String(tip.m + 1).padStart(2, "0")}</div>
           {tipCell && tipStats ? (
             <>
-              <div className="hd-tip-r"><span>Fire count</span><b>{fmtInt(tipStats.count.total)}</b></div>
-              <div className="hd-tip-r"><span>FRP</span><b>{fmtInt(tipStats.frp.total)} MW</b></div>
-              <div className="hd-tip-r"><span>Sensor origin</span><b>{sensorText(tipCell, tipStats.count)}</b></div>
-              <div className="hd-tip-r dim"><span>MODIS</span><b>{fmtInt(tipStats.count.modis)}</b></div>
-              <div className="hd-tip-r dim"><span>VIIRS</span><b>{tipCell.hasV ? fmtInt(tipStats.count.viirs) : "—"}</b></div>
+              <div className="hd-tip-r"><span>{mode === "harm" ? "Harmonized hotspots" : "Hotspots (raw)"}</span><b>{fmtInt(tipStats.count.total)}</b></div>
+              <div className="hd-tip-r"><span>Source</span><b>{provenance(Y0 + tip.yi, tip.m, mode)}</b></div>
+              <div className="hd-tip-r dim"><span>MODIS Aqua detected</span><b>{fmtInt(tipStats.count.modis)}</b></div>
+              <div className="hd-tip-r dim"><span>VIIRS detected</span><b>{tipCell.hasV ? fmtInt(tipStats.count.viirs) : "—"}</b></div>
             </>
           ) : (
             <div className="hd-tip-r"><span>No data</span></div>
@@ -1916,6 +1921,12 @@ const CSS = `
 
 .hd-chart-wrap{position:relative}
 .hd-chart{width:100%;height:auto;display:block}
+.hd-median{margin:0 14px;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.6);display:flex;flex-direction:column;gap:3px;font-size:12px}
+.hd-median-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.hd-median-cls{margin-left:auto;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:650;border:1px solid rgba(15,23,42,.15)}
+.hd-median-row{font-size:11.5px}
+.hd-median-row.dim{color:var(--mut);font-size:10.5px}
+.hd-panel-body>.hd-rc-apply{margin:0 14px;align-self:flex-end}
 .hd-axis{font-size:9px;fill:#64748b;font-variant-numeric:tabular-nums}
 .hd-annot{font-size:9px;fill:#b91c1c;font-weight:600}
 .hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#334155;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
