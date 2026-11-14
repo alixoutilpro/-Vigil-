@@ -427,30 +427,6 @@ function heatColor(t: number): string {
   }
   return "rgb(127,29,29)";
 }
-/** Diverging blue → white → red scale of the "warming stripes" (ColorBrewer RdBu, 9 classes). */
-const STRIPE_STOPS: [number, number, number][] = [
-  [8, 48, 107], [33, 102, 172], [67, 147, 195], [146, 197, 222], [247, 247, 247],
-  [253, 219, 199], [244, 165, 130], [214, 96, 77], [178, 24, 43], [103, 0, 13],
-];
-/** t in [-1, 1]: -1 = far fewer fires than the region's average year, +1 = far more. */
-function stripeColor(t: number): string {
-  const x = ((clamp(t, -1, 1) + 1) / 2) * (STRIPE_STOPS.length - 1);
-  const i = Math.min(Math.floor(x), STRIPE_STOPS.length - 2), f = x - i;
-  const [a, b] = [STRIPE_STOPS[i], STRIPE_STOPS[i + 1]];
-  return `rgb(${a.map((c, k) => Math.round(c + (b[k] - c) * f)).join(",")})`;
-}
-/**
- * One colour per year from the annual fire totals of the region: centred on the mean year,
- * scaled by the largest deviation, so the palest stripe is a typical year and the darkest
- * red / blue are the most / least active years. Years without data stay null (grey).
- */
-function stripeColors(annual: AnnualPt[]): (string | null)[] {
-  const vs = annual.map((p) => p.value).filter((v): v is number => v !== null);
-  if (!vs.length) return annual.map(() => null);
-  const mean = vs.reduce((a, b) => a + b, 0) / vs.length;
-  const dev = Math.max(...vs.map((v) => Math.abs(v - mean))) || 1;
-  return annual.map((p) => (p.value === null ? null : stripeColor((p.value - mean) / dev)));
-}
 
 function niceTicks(max: number, n = 3): number[] {
   if (max <= 0) return [0, 1];
@@ -915,7 +891,6 @@ export default function Vigil() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [vals]);
   const heatMax = useMemo(() => (serie ? heatMaxOf(serie.mois, metrique) : 1), [serie, metrique]);
-  const stripes = useMemo(() => stripeColors(annual), [annual]);
 
   const hexes = useMemo((): HexCollection => {
     if (!index) return { type: "FeatureCollection", features: [] };
@@ -1529,23 +1504,6 @@ export default function Vigil() {
         </div>
       </div>
 
-      {/* Fire stripes: one stripe per year, top right of the globe */}
-      {selection && serie && (
-        <div className="hd-stripes-card">
-          <div className="hd-stripes" role="img" aria-label={`Fire stripes ${Y0}–${Y1} for ${selectionName}: one stripe per year, blue = fewer hotspots, red = more hotspots than the average year`}>
-            {stripes.map((c, yi) => (
-              <i
-                key={yi}
-                className={c ? "" : "empty"}
-                style={{ background: c ?? undefined }}
-                title={`${Y0 + yi}: ${annual[yi].value === null ? "no data" : `${fmtInt(annual[yi].value!)} ${unit(metrique)}${annual[yi].est ? " (estimated, partial year)" : ""}`}`}
-              />
-            ))}
-          </div>
-          <div className="hd-stripes-axis"><span>{Y0}</span><span>{metrique === "hotspots" ? "detections" : "FRP"} / year</span><span>{Y1}</span></div>
-        </div>
-      )}
-
       {/* Left panel: Region card */}
       {selection && bornes && (
         <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
@@ -1791,12 +1749,6 @@ const CSS = `
 .hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
-.hd-stripes-card{position:absolute;top:62px;right:56px;z-index:5;width:240px;padding:6px;display:flex;flex-direction:column;gap:3px;
-  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;box-shadow:0 2px 12px rgba(15,23,42,.12)}
-.hd-stripes{display:flex;height:96px;border-radius:5px;overflow:hidden}
-.hd-stripes i{flex:1;min-width:0}
-.hd-stripes i.empty{background:repeating-linear-gradient(45deg,#e2e8f0 0 2px,#f8fafc 2px 4px)}
-.hd-stripes-axis{display:flex;justify-content:space-between;font-size:9.5px;color:var(--mut)}
 .hd-heat-legend{grid-column:1 / -1;display:flex;align-items:center;gap:6px;margin-top:4px;font-size:9.5px;color:var(--mut)}
 .hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:linear-gradient(90deg,#e8edf3,rgb(254,243,199) 4%,rgb(252,211,77) 25%,rgb(251,146,60) 50%,rgb(234,88,12) 72%,rgb(220,38,38) 88%,rgb(127,29,29))}
 .hd-cell.out{opacity:.35}
@@ -1880,8 +1832,6 @@ const CSS = `
   .hd-panel-left{left:8px;right:8px;width:auto;top:auto;bottom:calc(50vh + 24px);max-height:36vh}
   .hd-datechip{display:none}
   .hd-toolbar{right:50px}
-  .hd-stripes-card{width:150px;right:50px}
-  .hd-stripes{height:56px}
 }
 /* ── E7 block and PNG button ── */
 .hd-median{margin:0 14px;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.6);display:flex;flex-direction:column;gap:3px;font-size:12px}
