@@ -7,7 +7,7 @@
  * inside the region bbox; otherwise they fall back to the seeded generator.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import contractData from "../data/data.json";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
@@ -953,27 +953,24 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
   /* ── Date range ── */
   const toMonthStr = (y: number, m: number) => `${y}-${String(m + 1).padStart(2, "0")}`;
   const fromMonthStr = (s: string) => { const [y, m] = s.split("-").map(Number); return { y, m: m - 1 }; };
-  const minMonth = toMonthStr(Y0, FIRST_MONTH_Y0);
-  const maxMonth = toMonthStr(LATEST.y, LATEST.m);
   const [rangeErr, setRangeErr] = useState("");
 
-  const handleFromChange = (val: string) => {
-    const f = fromMonthStr(val);
-    if (f.y > range.to.y || (f.y === range.to.y && f.m > range.to.m)) {
-      setRangeErr("From must be earlier than To");
-    } else {
-      setRangeErr("");
-      onRangeChange({ ...range, from: f });
-    }
-  };
-  const handleToChange = (val: string) => {
-    const t = fromMonthStr(val);
-    if (range.from.y > t.y || (range.from.y === t.y && range.from.m > t.m)) {
-      setRangeErr("From must be earlier than To");
-    } else {
-      setRangeErr("");
-      onRangeChange({ ...range, to: t });
-    }
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const YEARS = Array.from({ length: LATEST.y - Y0 + 1 }, (_, i) => Y0 + i);
+  const key = (d: { y: number; m: number }) => d.y * 12 + d.m;
+  const minKey = key({ y: Y0, m: FIRST_MONTH_Y0 }), maxKey = key(LATEST);
+  const fromKey = (k: number) => ({ y: Math.floor(k / 12), m: k % 12 });
+  const clampKey = (k: number) => Math.min(maxKey, Math.max(minKey, k));
+
+  // Changing one bound never gets rejected: if it crosses the other bound, the other one follows.
+  const setBound = (which: "from" | "to", part: "y" | "m", value: number) => {
+    const cur = range[which];
+    const next = fromKey(clampKey(key({ ...cur, [part]: value })));
+    let { from, to } = range;
+    if (which === "from") { from = next; if (key(from) > key(to)) to = next; }
+    else { to = next; if (key(to) < key(from)) from = next; }
+    setRangeErr("");
+    onRangeChange({ from, to });
   };
 
   /* ── Export ── */
@@ -1076,28 +1073,30 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         <div className="hd-rc-seclabel">Study period</div>
         <div className="hd-rc-rangerow">
           <div className="hd-rc-field">
-            <label htmlFor="hd-range-from" className="hd-rc-fieldlabel">From</label>
-            <input
-              id="hd-range-from"
-              type="month"
-              className="hd-rc-monthinput"
-              min={minMonth}
-              max={maxMonth}
-              value={toMonthStr(range.from.y, range.from.m)}
-              onChange={(e) => handleFromChange(e.target.value)}
-            />
+            <label htmlFor="hd-range-from-m" className="hd-rc-fieldlabel">From</label>
+            <div className="hd-rc-datepair">
+              <select id="hd-range-from-m" className="hd-rc-monthinput" aria-label="From month"
+                value={range.from.m} onChange={(e) => setBound("from", "m", Number(e.target.value))}>
+                {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              <select id="hd-range-from-y" className="hd-rc-monthinput" aria-label="From year"
+                value={range.from.y} onChange={(e) => setBound("from", "y", Number(e.target.value))}>
+                {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
           </div>
           <div className="hd-rc-field">
-            <label htmlFor="hd-range-to" className="hd-rc-fieldlabel">To</label>
-            <input
-              id="hd-range-to"
-              type="month"
-              className="hd-rc-monthinput"
-              min={minMonth}
-              max={maxMonth}
-              value={toMonthStr(range.to.y, range.to.m)}
-              onChange={(e) => handleToChange(e.target.value)}
-            />
+            <label htmlFor="hd-range-to-m" className="hd-rc-fieldlabel">To</label>
+            <div className="hd-rc-datepair">
+              <select id="hd-range-to-m" className="hd-rc-monthinput" aria-label="To month"
+                value={range.to.m} onChange={(e) => setBound("to", "m", Number(e.target.value))}>
+                {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
+              </select>
+              <select id="hd-range-to-y" className="hd-rc-monthinput" aria-label="To year"
+                value={range.to.y} onChange={(e) => setBound("to", "y", Number(e.target.value))}>
+                {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+              </select>
+            </div>
           </div>
         </div>
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
@@ -1193,10 +1192,11 @@ export default function Vigil() {
     return all.length ? all[Math.floor(all.length * 0.98)] || 1 : 1;
   }, [vals]);
 
+  const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while points rebuild
   // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
   const rangeHot = useMemo(
-    () => (selection ? buildRangeHotspots(selection, selRange, mode) : null),
-    [selection, selRange, mode],
+    () => (selection ? buildRangeHotspots(selection, deferredRange, mode) : null),
+    [selection, deferredRange, mode],
   );
   const hotspots = useMemo(
     () => rangeHot?.fc ?? buildHotspots(date.y, date.m, mode),
@@ -1889,6 +1889,8 @@ const CSS = `
 .hd-rc-apply:not(:disabled):hover{background:var(--tx);color:#fff;border-color:var(--tx)}
 .hd-rc-apply:disabled{opacity:.4;cursor:default}
 .hd-rc-rangerow{display:flex;gap:10px}
+.hd-rc-datepair{display:flex;gap:4px}
+.hd-rc-datepair select{min-width:0;flex:1}
 .hd-rc-rangerow .hd-rc-field{flex:1}
 .hd-rc-note{font-size:10.5px;color:var(--mut);font-style:italic}
 .hd-analysis-slot{background:rgba(15,23,42,.03);border:1px solid var(--bd);border-radius:7px;padding:9px 11px;display:flex;flex-direction:column;gap:3px}
