@@ -146,6 +146,40 @@ export const chargerTuile = (parent: string) => {
   return unique(url, async () => decoderTuile(await chargerBinaire(url)));
 };
 
+/**
+ * Raw vs harmonized calendars of one country (pipeline/v2/export_calendrier_brut.py → brut/<pays>.json).
+ * Same cleaned daily tables and same day-by-day satellite rule as the harmonized series; only the conversion differs.
+ * Arrays are aligned month by month from `premier_mois`; null = no data (before Aqua).
+ */
+export type SerieBrute = "naif_2012" | "brut_2020" | "harmonise" | "Terra" | "Aqua" | "SNPP" | "NOAA20";
+export interface CalendrierBrut {
+  pays: string;
+  premier_mois: string;
+  dernier_mois: string;
+  mois_partiel: string | null;
+  donnees_jusqu_au: string;
+  bascule_naive: string;
+  bascule_vigil: string;
+  controle: {
+    max_ecart_brut2020_vs_harmonise_avant_bascule: { hotspots: number; frp: number };
+    ratio_harmonise_sur_viirs_brut_depuis_bascule: { hotspots: number; frp: number };
+  };
+  hotspots: Record<SerieBrute, (number | null)[]>;
+  frp_MW: Record<SerieBrute, (number | null)[]>;
+}
+/** H3 res-5 hexagons holding detections of a country (h3_5/pays/<pays>.bin.gz, sorted uint64 little-endian). */
+export const chargerHexPays = (pays: string) => {
+  const url = `${BASE}/h3_5/pays/${pays}.bin.gz`;
+  return unique(url, async () => {
+    const v = await chargerBinaire(url), s = new Set<string>();
+    for (let o = 0; o + 8 <= v.byteLength; o += 8) s.add(v.getBigUint64(o, true).toString(16));
+    return s;
+  });
+};
+/** Countries for which brut/<pays>.json is exported (raw vs harmonized tabs). */
+export const PAYS_BRUT = new Set(["Greece"]);
+export const chargerBrut = (pays: string) => chargerJSON<CalendrierBrut>(`brut/${pays}.json`);
+
 /* ── Months ────────────────────────────────────────────────────────────── */
 
 export const cleMois = (s: string) => { const [y, m] = s.split("-").map(Number); return { y, m: m - 1 }; };
