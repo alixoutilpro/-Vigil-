@@ -13,7 +13,7 @@
  * Calendar, map and CSV export of a zone come from the same hexagons, so they agree.
  */
 
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import React, { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
 import OrbitOverlay from "./OrbitOverlay";
@@ -301,7 +301,7 @@ function regionFromRing(ring: Ring): RegionDef {
 /* Hexagon map and CSV export                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-const MORPH_MS = 1100; // globe <-> plan animation
+const MORPH_MS = 700; // globe <-> plan animation
 const monthKey = (y: number, m: number) => y * 12 + m;
 const ym = (k: number) => texteMois(Math.floor(k / 12), k % 12);
 
@@ -1333,10 +1333,10 @@ export default function Vigil() {
         colorRef.current();
       };
       map.on("style.load", install);
-      map.on("zoomend", () => { if (map) setResCarte(resPourZoom(map.getZoom())); });
+      map.on("zoomend", () => { if (map) { const r = resPourZoom(map.getZoom()); startTransition(() => setResCarte(r)); } });
       map.on("load", () => {
         install(); pushSources(); loadedRef.current = true; setReady(true);
-        if (map) setResCarte(resPourZoom(map.getZoom()));
+        if (map) { const r = resPourZoom(map.getZoom()); startTransition(() => setResCarte(r)); }
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
@@ -1505,17 +1505,7 @@ export default function Vigil() {
         m.setMaxPitch(flat ? 0 : 75);
       } catch { /* older style spec */ }
     };
-    // After a morph MapLibre can keep the tile coverage computed for an intermediate projection,
-    // leaving blank rectangles: re-set the raster tile URLs so every source re-requests its tiles.
-    const refreshTiles = () => {
-      try {
-        for (const id of ["sat", "roads", "places"]) {
-          const src = SAT_STYLE.sources[id] as { tiles: string[] };
-          (m.getSource(id) as unknown as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.(src.tiles);
-        }
-        m.triggerRepaint();
-      } catch { /* source not ready */ }
-    };
+    const refreshTiles = () => { try { m.triggerRepaint(); } catch { /* source not ready */ } };
     try {
       if (flat) {
         m.dragRotate.disable();
@@ -1531,10 +1521,13 @@ export default function Vigil() {
     const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     if (from === flat || reduce) { settle(); if (from !== flat) refreshTiles(); return; }
 
-    let raf = 0;
+    // Throttle to ~30 fps: skip every other frame so MapLibre has budget to render between projection updates.
+    let raf = 0, lastStep = -1;
     const t0 = performance.now();
     const step = (now: number) => {
       const p = clamp((now - t0) / MORPH_MS, 0, 1);
+      if (p < 1 && now - lastStep < 28) { raf = requestAnimationFrame(step); return; }
+      lastStep = now;
       const e = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2; // easeInOutCubic
       const t = flat ? e : 1 - e;
       const z = m.getZoom();
