@@ -952,7 +952,6 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   /* ── Date range ── */
   const toMonthStr = (y: number, m: number) => `${y}-${String(m + 1).padStart(2, "0")}`;
-  const fromMonthStr = (s: string) => { const [y, m] = s.split("-").map(Number); return { y, m: m - 1 }; };
   const [rangeErr, setRangeErr] = useState("");
 
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
