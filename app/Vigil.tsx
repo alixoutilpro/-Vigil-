@@ -1401,7 +1401,7 @@ export default function Vigil() {
 
       {/* Toolbar */}
       <div className="hd-toolbar">
-        <span className="hd-word">Vigil</span>
+        <img className="hd-logo" src="/vigil-logo.png" alt="Vigil" />
 
         {/* Country search */}
         <div className="hd-search" ref={searchRef}>
@@ -1690,6 +1690,7 @@ const CSS = `
 .hd-toolbar{position:absolute;top:12px;left:12px;right:60px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;pointer-events:none;z-index:5}
 .hd-toolbar>*{pointer-events:auto;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;box-shadow:0 2px 12px rgba(15,23,42,.12)}
 .hd-word{padding:7px 12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
+.hd-logo{display:block;height:32px;width:auto;padding:0 4px;background:#fff!important}
 .hd-group{display:flex;gap:2px;padding:3px}
 .hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#334155;white-space:nowrap}
 .hd-btn:hover{background:var(--bg2)}
