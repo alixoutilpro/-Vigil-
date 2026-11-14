@@ -184,10 +184,10 @@ export default function DeepDive({ index, serie, ring, bbox, y0, y1, focus, stat
           <div className="hd-dd-chartbody">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={dd.c1} margin={{ top: 4, right: 32, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 8, fill: "#94a3b8" }} interval={23} tickLine={false} axisLine={false} />
-                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
-                <YAxis yAxisId="temp" orientation="right" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={22} unit="°" />
+                <CartesianGrid stroke="rgba(15,23,42,0.18)" strokeDasharray="2 2" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 8, fill: "#64748b" }} interval={23} tickLine={false} axisLine={false} />
+                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={30} />
+                <YAxis yAxisId="temp" orientation="right" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={22} unit="°" />
                 <Tooltip contentStyle={tipStyle} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
                 <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
                 <Line yAxisId="fires" type="monotone" dataKey="fires" stroke="#ea580c" strokeWidth={1} dot={false} name="Hotspots (harmonized)" />
@@ -204,10 +204,10 @@ export default function DeepDive({ index, serie, ring, bbox, y0, y1, focus, stat
           <div className="hd-dd-chartbody">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={dd.c2} margin={{ top: 4, right: 32, left: 0, bottom: 0 }}>
-                <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" vertical={false} />
-                <XAxis dataKey="name" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} />
-                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
-                <YAxis yAxisId="wx" orientation="right" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={22} />
+                <CartesianGrid stroke="rgba(15,23,42,0.18)" strokeDasharray="2 2" vertical={false} />
+                <XAxis dataKey="name" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} />
+                <YAxis yAxisId="fires" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={30} />
+                <YAxis yAxisId="wx" orientation="right" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={22} />
                 <Tooltip contentStyle={tipStyle} labelStyle={{ color: "#94a3b8", marginBottom: 2 }} />
                 <Legend iconSize={7} wrapperStyle={{ fontSize: 9, color: "#64748b" }} />
                 <Bar yAxisId="fires" dataKey="fires" name="Hotspots (median)" radius={[2, 2, 0, 0]}>
@@ -232,9 +232,9 @@ export default function DeepDive({ index, serie, ring, bbox, y0, y1, focus, stat
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <ScatterChart margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-                  <CartesianGrid stroke="rgba(15,23,42,0.1)" strokeDasharray="2 2" />
-                  <XAxis type="number" dataKey="hdi" name="Hot/dry index" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} domain={[0, "dataMax"]} tickFormatter={(v: number) => v.toFixed(2)} />
-                  <YAxis type="number" dataKey="fires" name="Hotspots" tick={{ fontSize: 8, fill: "#94a3b8" }} tickLine={false} axisLine={false} width={30} />
+                  <CartesianGrid stroke="rgba(15,23,42,0.18)" strokeDasharray="2 2" />
+                  <XAxis type="number" dataKey="hdi" name="Hot/dry index" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} domain={[0, "dataMax"]} tickFormatter={(v: number) => v.toFixed(2)} />
+                  <YAxis type="number" dataKey="fires" name="Hotspots" tick={{ fontSize: 8, fill: "#64748b" }} tickLine={false} axisLine={false} width={30} />
                   <Tooltip cursor={{ strokeDasharray: "3 3" }} content={({ active, payload }) => {
                     if (!active || !payload?.length) return null;
                     const d = payload[0]?.payload as { hdi: number; fires: number; label: string };
@@ -259,14 +259,14 @@ const DD_CSS = `
 .hd-split-pane:not(.hd-split-analytics){flex:0 0 44%}
 .hd-split-analytics{flex:1;overflow:hidden;min-width:0;display:flex;flex-direction:column;gap:6px}
 .hd-dd-kpi6{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;flex-shrink:0}
-.hd-kpi-cell{min-width:0;background:rgba(15,23,42,.03);border:1px solid var(--bd);border-radius:6px;padding:5px 7px;display:flex;flex-direction:column;gap:2px}
+.hd-kpi-cell{min-width:0;background:rgba(255,255,255,.55);border:1px solid rgba(255,255,255,.35);border-radius:6px;padding:5px 7px;display:flex;flex-direction:column;gap:2px}
 .hd-kpi-lbl{font-size:9px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hd-kpi-val{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;color:var(--tx)}
 .hd-kpi-txt{font-size:11px;font-family:inherit}
 .hd-kpi-sub{font-size:9px;color:var(--mut)}
 .hd-dd-charts{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:6px}
 .hd-dd-wide{grid-column:1 / span 2}
-.hd-dd-chart{background:var(--bg);border:1px solid rgba(15,23,42,0.1);border-radius:8px;padding:7px 9px 5px;display:flex;flex-direction:column;gap:3px;min-height:0;overflow:hidden}
+.hd-dd-chart{background:rgba(255,255,255,.55);border:1px solid rgba(255,255,255,.25);border-radius:8px;padding:7px 9px 5px;display:flex;flex-direction:column;gap:3px;min-height:0;overflow:hidden}
 .hd-dd-ctitle{font-size:9px;font-weight:650;text-transform:uppercase;letter-spacing:.07em;color:var(--mut);flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hd-dd-corr{font-weight:400;text-transform:none;letter-spacing:0;font-size:9px}
 .hd-dd-chartbody{flex:1;min-height:0;position:relative}
