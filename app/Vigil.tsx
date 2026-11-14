@@ -442,10 +442,12 @@ function contractEnd() {
 }
 
 /** Monthly cells for a region from data/data.json, or null when no contract cell lies in its bbox. */
-function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
+function contractRegionData(r: RegionDef, ring?: Ring): (Cell | null)[][] | null {
   const [la0, la1, lo0, lo1] = r.bbox;
   const rows = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
   if (!rows.length) return null;
+  // Same cells as the map points: with a drawn polygon only the cells inside it are summed
+  // (coverage / first month still come from every cell in the bbox, so excluded months read 0, not "no data").
   const acc = Array.from({ length: NY }, () =>
     Array.from({ length: 12 }, () => ({ modis: 0, viirs: 0, harm: 0, wild: 0 })));
   let first = { y: 9999, m: 0 };
@@ -453,6 +455,7 @@ function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
     const k = isoWeekMonth(c.iso_year, c.iso_week);
     if (k.y < Y0 || k.y > Y1) continue;
     if (k.y < first.y || (k.y === first.y && k.m < first.m)) first = k;
+    if (ring && !pip(c.lon, c.lat, ring)) continue;
     const a = acc[k.y - Y0][k.m];
     a.modis += c.modis_fire_days ?? 0;
     a.viirs += c.viirs_fire_days ?? 0;
@@ -474,8 +477,8 @@ function contractRegionData(r: RegionDef): (Cell | null)[][] | null {
     }));
 }
 
-function regionData(r: RegionDef): (Cell | null)[][] {
-  return contractRegionData(r) ?? generateRegionData(r);
+function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
+  return contractRegionData(r, ring) ?? generateRegionData(r);
 }
 
 /** Value of a cell for a given harmonization variant / metric / fire-type filter. */
@@ -1194,7 +1197,7 @@ export default function Vigil() {
 
   /* ── Derived data ── */
   const region = selection?.region ?? REGIONS[0];
-  const data = useMemo(() => regionData(region), [region]);
+  const data = useMemo(() => regionData(region, selection?.ring), [region, selection]);
   const rawVals = useMemo(() => monthlyValues(data, "raw", metric, "all"), [data, metric]);
   const harmVals = useMemo(() => monthlyValues(data, "harm", metric, "all"), [data, metric]);
   const vals = mode === "raw" ? rawVals : harmVals;
@@ -1498,14 +1501,25 @@ export default function Vigil() {
           <div className="hd-heat-row">{large || yi % 2 === 0 ? Y0 + yi : ""}</div>
           {row.map((c, m) => {
             const bg = !c ? undefined : c.total < heatMax * 0.015 ? "#e8edf3" : heatColor(Math.pow(c.total / heatMax, 0.62));
-            const sel = date.y === Y0 + yi && date.m === m;
+            const k = (Y0 + yi) * 12 + m;
+            const inRange = k >= selRange.from.y * 12 + selRange.from.m && k <= selRange.to.y * 12 + selRange.to.m;
+            const sel = selection ? inRange && selRange.from.y * 12 + selRange.from.m === selRange.to.y * 12 + selRange.to.m : date.y === Y0 + yi && date.m === m;
             return (
               <div
                 key={m}
-                className={"hd-cell" + (c ? "" : " empty") + (sel ? " sel" : "")}
+                className={"hd-cell" + (c ? "" : " empty") + (sel ? " sel" : "") + (selection && !inRange ? " out" : "")}
                 style={{ background: bg }}
                 onMouseMove={(e) => setTip({ x: e.clientX, y: e.clientY, yi, m })}
-                onClick={() => c && setDate({ y: Y0 + yi, m })}
+                onClick={(e) => {
+                  if (!c) return;
+                  if (!selection) { setDate({ y: Y0 + yi, m }); return; }
+                  // With a selection the calendar edits the study period: click = that month, shift+click = extend.
+                  const cur = { y: Y0 + yi, m };
+                  if (e.shiftKey) {
+                    const a = selRange.from, lo = k < a.y * 12 + a.m;
+                    setSelRange(lo ? { from: cur, to: selRange.to } : { from: selRange.from, to: cur });
+                  } else setSelRange({ from: cur, to: cur });
+                }}
                 aria-label={c ? `${MONTHS[m]} ${Y0 + yi}: ${fmtInt(c.total)} ${unit(metric)}` : `${MONTHS[m]} ${Y0 + yi}: no data`}
               />
             );
@@ -1840,6 +1854,7 @@ const CSS = `
 .hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
+.hd-cell.out{opacity:.35}
 .hd-cell.sel{outline:1.5px solid var(--tx);outline-offset:0;position:relative;z-index:1}
 .hd-cell:hover{outline:1px solid var(--tx);outline-offset:0;position:relative;z-index:1}
 
