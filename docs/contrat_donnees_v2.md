@@ -70,6 +70,18 @@ compte_calendrier, origine, version`. `categorie` = raison quand le point n'est 
 (`confiance_basse`, `industriel_G6`, `volcan_ou_offshore`, `quasi_doublon`, …) ; `compte_calendrier = True` = compté.
 Export CSV d'une recherche = filtrer zone + dates, garder toutes les colonnes (transparence).
 
+### `brut/<Pays>.json` — calendriers brut / harmonisé (Grèce)
+Produit par `python -m pipeline.v2.export_calendrier_brut --pays Greece`. Tableaux mensuels alignés sur `premier_mois`
+(`hotspots` et `frp_MW`) : `naif_2012` (Aqua jusqu'en 2012-01 puis VIIRS brut), `brut_2020` (Aqua jusqu'en 2020-10 puis
+VIIRS brut non converti), `harmonise` (série VIGIL-K1 publiée), et brut par satellite (`Terra`, `Aqua`, `SNPP`, `NOAA20`).
+Mêmes tables nettoyées et même règle satellite/jour que la série harmonisée. Contrôle écrit dans `controle` :
+`brut_2020 == harmonise` avant la bascule (écart max 0).
+
+### `h3_5/pays/<Pays>.bin.gz` et `h3_5/pays_index.*` — hexagones d'un pays
+`python -m pipeline.v2.export_h3_pays`. Par pays : uint64 little-endian triés (hexagones res 5 contenant au moins une
+détection végétation Aqua / S-NPP / NOAA-20 de ce pays). `pays_index.bin.gz` = `[n uint32][4 octets][h3 uint64 × n][code uint16 × n]`
+trié par h3, noms dans `pays_index.json` (infobulle de la carte). Un hexagone frontalier peut appartenir à plusieurs pays.
+
 ## 3. Lecture en JavaScript
 
 ```js

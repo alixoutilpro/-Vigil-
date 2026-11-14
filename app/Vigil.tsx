@@ -18,12 +18,12 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
 import OrbitOverlay from "./OrbitOverlay";
 import {
-  BASE, ErreurDonnees, centreHex, chargerIncertitude, chargerIndex, chargerMois, chargerPays, chargerTuile,
+  BASE, ErreurDonnees, PAYS_BRUT, centreHex, chargerBrut, chargerHexPays, chargerIncertitude, chargerIndexPays, chargerPointsGrece, paysDeHex, chargerIndex, chargerMois, chargerPays, chargerTuile,
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
-  type HexMois, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type Tuile,
+  type CalendrierBrut, type HexMois, type IndexPays, type PointGrece, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
 } from "./donnees";
-import { cellArea, cellToParent } from "h3-js";
-import { serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
+import { cellArea, cellToChildren, cellToParent } from "h3-js";
+import { quantileHF8, rangValeur, serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 import DeepDive from "./DeepDive";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -383,7 +383,7 @@ function exportCsv(zone: ZoneChargee, index: IndexV2, range: DateRange): string 
   if (!serie.length) return null;
   const tete = `# Vigil ${index.methode} - ${zone.serie.source === "pays" ? `country ${zone.region.pays} (pays.json, validated scale)` : `zone of ${zone.serie.hexagones.length} H3 res-5 hexagons (centre inside)`}\n` +
     `# hotspots = ${index.unites.hotspots}; frp_MW = ${index.unites.frp_MW}; bands = ${zone.serie.table ?? "n/a"}; generated ${index.genere_le}\n`;
-  let csv = tete + "month,hotspots,low_80,high_80,low_95,high_95,frp_MW,frp_low_80,frp_high_80,provenance,partial,coverage_days\n" + serie.join("\n") + "\n";
+  let csv = tete + "month,hotspots,low_80,high_80,low_95,high_95,frp_MW,frp_low_80,frp_high_80,provenance,partial,share_of_days_with_data_global\n" + serie.join("\n") + "\n";
   if (zone.serie.source === "h3") {
     const dans = new Set(zone.serie.hexagones), lignes: string[] = [];
     for (const t of zone.tuiles) for (const [h, parMois] of t) {
@@ -436,57 +436,40 @@ function heatMaxOf(mois: (MoisZone | null)[], metrique: Metrique): number {
 const heatT = (x: number, max: number) => (x <= 0 ? 0 : Math.log1p(x) / Math.log1p(Math.max(max, 1)));
 
 /**
- * Map fill colour: density per 1,000 km² per month in 12 EQUAL-FREQUENCY classes (each colour = 1/12 of the active
- * hexagon-months of 2002-07 → 2026-10), one set of breaks per displayed H3 resolution. Breaks are fixed in time,
- * so months, seasons and years stay comparable, and dense where the data are, so neighbouring territories separate.
- * Computed on 13.5 M res-5 hexagon-months (and their res-4 / res-3 parents), partial month excluded.
- * 12 shades from very light yellow to very dark red: sequential, monotone lightness, colour-blind safe.
+ * Map fill colour (method: docs/legende_carte.md). Value = harmonized detections (MODIS-Aqua eq.) or Σ FRP of the
+ * hexagon, per 1,000 km², per month (H3 cells differ in area, and the drawn resolution follows the zoom).
+ * 12 FIXED classes, the SAME at every zoom and every month: one colour = one density everywhere.
+ * Breaks are near-geometric (×2–2.5, round numbers) because densities span ~5 orders of magnitude (heavy tail).
+ * Hotspots: class [3, 7) is anchored on ONE detection in a res-5 hexagon (153–305 km² → 3.3–6.5 / 1,000 km²),
+ * so the colour never encodes the hexagon's area. FRP: plain 1-2-5 series.
+ * Occupancy checked on 13.5 M res-5 hexagon-months 2002-07 → 2026-10 (and their res-4/res-3 parents):
+ * no empty class, none above 28 %. Sequential light-yellow → dark-red ramp, monotone lightness, colour-blind safe.
  */
 const HEX_COLORS = ["#ffffd4", "#fff3a8", "#ffe680", "#ffd45c", "#ffbd45", "#fea03a", "#fd8132", "#f5602a", "#e44022", "#c9261b", "#a11416", "#6e0a10"];
-const DENS_BREAKS: Record<Metrique, Record<number, number[]>> = {
-  hotspots: {
-    3: [0.0323, 0.0751, 0.0988, 0.162, 0.244, 0.374, 0.581, 0.953, 1.7, 3.5, 9.84],
-    4: [0.124, 0.364, 0.528, 0.629, 1.02, 1.43, 2.07, 3.19, 5.3, 9.97, 23.8],
-    5: [0.724, 1.57, 3.35, 3.79, 4.45, 6.93, 9.06, 13.2, 19.4, 31.2, 59.5],
-  },
-  frp: {
-    3: [0.408, 0.865, 1.58, 2.75, 4.73, 8.13, 14.4, 26.8, 54.6, 129, 414],
-    4: [1.73, 4.07, 6.77, 11, 17.7, 29.1, 49.3, 87.3, 166, 356, 975],
-    5: [9.65, 23.5, 38.2, 58.3, 88.8, 136, 214, 347, 590, 1100, 2480],
-  },
+const DENS_BREAKS: Record<Metrique, number[]> = {
+  hotspots: [0.02, 0.05, 0.1, 0.2, 0.5, 1, 3, 7, 12, 25, 60],
+  frp: [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000],
 };
-function hexColorExpr(metrique: Metrique, res: number): unknown {
+function hexColorExpr(metrique: Metrique): unknown {
   const stops: unknown[] = [];
-  DENS_BREAKS[metrique][res].forEach((v, i) => stops.push(v, HEX_COLORS[i + 1]));
+  DENS_BREAKS[metrique].forEach((v, i) => stops.push(v, HEX_COLORS[i + 1]));
   return ["step", ["get", "c"], HEX_COLORS[0], ...stops];
 }
-/** Lowest class fades (sparse detections), every other class is drawn opaque enough to read the gradient. */
-function hexOpacityExpr(metrique: Metrique, res: number): unknown {
-  const b0 = DENS_BREAKS[metrique][res][0];
-  return ["interpolate", ["linear"], ["zoom"], 2, ["case", ["<", ["get", "c"], b0], 0.4, 0.9], 9, ["case", ["<", ["get", "c"], b0], 0.35, 0.75]];
+/** Every class drawn opaque enough to read the ramp; slightly more transparent when zoomed in (imagery visible). */
+function hexOpacityExpr(): unknown {
+  return ["interpolate", ["linear"], ["zoom"], 2, 0.88, 9, 0.75];
 }
 
 interface AnnualPt {
   value: number | null;
+  /** Kept for the chart API: always false now (partial years are not extrapolated). */
   est: boolean;
 }
-/** Annual totals; incomplete years (2002, current year, partial month) are scaled up from the mean seasonal share. */
+/** Annual totals of COMPLETE years only. Incomplete years (2002, current year, partial month) are left out of the
+ *  line: extrapolating them from the mean seasonal share had no uncertainty (audit 14/11: Africa 2026 shown 385 k,
+ *  plausible 316–491 k). They are compared year-to-date instead (ytd below). */
 function annualSeries(vals: (number | null)[][]): AnnualPt[] {
-  const sums = vals.map((r) => r.reduce<number>((a, c) => a + (c ?? 0), 0));
-  const isFull = vals.map((r) => r.every((c) => c !== null));
-  return vals.map((row, yi) => {
-    if (isFull[yi]) return { value: sums[yi], est: false };
-    const obsMonths = row.map((c, m) => (c !== null ? m : -1)).filter((m) => m >= 0);
-    if (!obsMonths.length) return { value: null, est: true };
-    const ratios: number[] = [];
-    vals.forEach((r2, yj) => {
-      if (!isFull[yj] || sums[yj] <= 0) return;
-      ratios.push(obsMonths.reduce((a, m) => a + (r2[m] as number), 0) / sums[yj]);
-    });
-    const frac = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : 0;
-    if (frac < 0.2) return { value: null, est: true };
-    return { value: sums[yi] / frac, est: true };
-  });
+  return vals.map((r) => (r.every((c) => c !== null) ? { value: r.reduce<number>((a, c) => a + (c as number), 0), est: false } : { value: null, est: false }));
 }
 
 function heatColor(t: number): string {
@@ -848,6 +831,21 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
 /* ────────────────────────────────────────────────────────────────────────── */
 
 interface Selection { region: RegionDef; ring: Ring; wasPolygon: boolean }
+/** Calendar tabs of the countries with a raw export (PAYS_BRUT): what harmonization changes, all else equal. */
+type VueCal = Extract<SerieBrute, "naif_2012" | "brut_2020" | "harmonise">;
+const VUES_CAL: { v: VueCal; t: string; def: string }[] = [
+  { v: "naif_2012", t: "Raw · naive 2012", def: "MODIS Aqua until Jan 2012, then raw VIIRS counts (S-NPP, NOAA-20 on S-NPP gaps), not converted: the naive splice." },
+  { v: "brut_2020", t: "Raw · switch 2020", def: "MODIS Aqua until Oct 2020, then raw VIIRS counts, not converted: same switch date as VIGIL-K1, only the conversion is missing." },
+  { v: "harmonise", t: "Harmonized", def: "VIGIL-K1: MODIS Aqua observed until Oct 2020, then VIIRS converted to MODIS-Aqua equivalent (k per country × day/night × month)." },
+];
+const VIIRS_BRUT = "VIIRS S-NPP (NOAA-20 on S-NPP gaps), raw";
+/** Fire-by-fire layer: every raw Greek detection of the map month (points_grece). */
+const PAYS_POINTS = "Greece";
+const LIB_CATEGORIE: Record<string, string> = {
+  retenu_vegetation: "counted (vegetation fire)", confiance_basse: "not counted: low confidence", industriel_G6: "not counted: industrial / fixed site",
+  volcan_ou_offshore: "not counted: volcano or offshore", quasi_doublon: "near-duplicate of another detection",
+};
+const LIB_SAT: Record<string, string> = { Aqua: "MODIS Aqua", Terra: "MODIS Terra", SNPP: "VIIRS S-NPP", NOAA20: "VIIRS NOAA-20", NOAA21: "VIIRS NOAA-21" };
 const NEW_REGION = "New region";
 type Tool = "none" | "box" | "poly";
 
@@ -938,11 +936,17 @@ export default function Vigil() {
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
+  /** Raw vs harmonized calendars (country mode, PAYS_BRUT only) and the tab shown. */
+  const [brut, setBrut] = useState<CalendrierBrut | null>(null);
+  const [vueCal, setVueCal] = useState<VueCal>("harmonise");
+  /** Country mode: H3 res-5 hexagons with detections of THAT country (h3_5/pays/<pays>.bin.gz), not its bounding box. */
+  const [hexPays, setHexPays] = useState<{ pays: string; h3: Set<string> } | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const hexRef = useRef<HexCollection>({ type: "FeatureCollection", features: [] });
+  const ptsRef = useRef<unknown>(EMPTY_FC);
   const selFcRef = useRef<unknown>(EMPTY_FC);
   const draftRef = useRef<unknown>(EMPTY_FC);
   const toolRef = useRef<Tool>("none");
@@ -956,6 +960,10 @@ export default function Vigil() {
   const zoneReq = useRef(0);
   toolRef.current = tool;
   panelOpenRef.current = panelOpen;
+  const metriqueRef = useRef<Metrique>(metrique);
+  metriqueRef.current = metrique;
+  const indexRef = useRef<IndexV2 | null>(null);
+  indexRef.current = index;
 
   /* ── Data: index.json + incertitude.json at start ── */
   const bornes: Bornes | null = useMemo(() => index && index.mois.length
@@ -1018,10 +1026,36 @@ export default function Vigil() {
     })();
   }, [selection, index, inc]);
 
+  useEffect(() => {
+    const p = selection?.region.pays;
+    if (!p) { setHexPays(null); return; }
+    let vivant = true;
+    chargerHexPays(p).then((h3) => { if (vivant) setHexPays({ pays: p, h3 }); })
+      .catch((e) => { if (vivant) { setHexPays(null); console.warn("Country hexagons unavailable:", e); } });
+    return () => { vivant = false; };
+  }, [selection]);
+
+  /* ── Raw vs harmonized calendars of the selected country, when exported (brut/<pays>.json) ── */
+  useEffect(() => {
+    const p = selection?.region.pays;
+    if (!p || !PAYS_BRUT.has(p)) { setBrut(null); return; }
+    let vivant = true;
+    chargerBrut(p).then((b) => { if (vivant) setBrut(b); })
+      .catch((e) => { if (vivant) { setBrut(null); console.warn("Raw calendar unavailable:", e); } });
+    return () => { vivant = false; };
+  }, [selection]);
+
   /* ── Map month file: the slider month, or the end of the study period in country mode ── */
   const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while the map rebuilds
   const modeH3 = !!selection && !selection.region.pays;
-  const moisCarte = !index ? null : !selection ? texteMois(date.y, date.m) : modeH3 ? null : texteMois(deferredRange.to.y, deferredRange.to.m);
+  const moisCarte = (() => {
+    if (!index) return null;
+    if (!selection) return texteMois(date.y, date.m);
+    if (modeH3) return null;
+    const to = deferredRange.to, from = deferredRange.from, s = texteMois(to.y, to.m);
+    if (s !== moisPartiel(index) || monthKey(from.y, from.m) === monthKey(to.y, to.m)) return s;
+    return to.m === 0 ? texteMois(to.y - 1, 11) : texteMois(to.y, to.m - 1);
+  })();
   useEffect(() => {
     setMoisErr(null);
     if (!index || !moisCarte) { setMoisRows(null); return; }
@@ -1037,26 +1071,72 @@ export default function Vigil() {
   const serie = zone?.serie ?? null;
   const Y0 = bornes?.first.y ?? 2002, Y1 = bornes?.last.y ?? 2002;
   const NY = Y1 - Y0 + 1;
-  /** Calendar values: [year][month] of the chosen metric, null = no data. */
+  /** Raw series of the selected country (null when not exported or not in country mode). */
+  const blocBrut = brut && selection?.region.pays === brut.pays ? (metrique === "hotspots" ? brut.hotspots : brut.frp_MW) : null;
+  const vueEff: VueCal = blocBrut ? vueCal : "harmonise";
+  const valBrut = (y: number, m: number, s: SerieBrute): number | null => {
+    if (!blocBrut || !brut) return null;
+    const o = cleMois(brut.premier_mois);
+    return blocBrut[s][(y - o.y) * 12 + (m - o.m)] ?? null;
+  };
+  /** Calendar values: [year][month] of the chosen metric and tab, null = no data. */
   const vals = useMemo(() => Array.from({ length: NY }, (_, yi) => Array.from({ length: 12 }, (_, m): number | null => {
     if (!serie || !index) return null;
     const c = serie.mois[indiceMois(index, Y0 + yi, m)];
-    return c ? c[metrique] : null;
-  })), [serie, index, metrique, NY, Y0]);
+    if (!c) return null;
+    return vueEff === "harmonise" ? c[metrique] : valBrut(Y0 + yi, m, vueEff);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  })), [serie, index, metrique, NY, Y0, vueEff, blocBrut]);
   const cellOf = (yi: number, m: number): MoisZone | null => (serie && index ? serie.mois[indiceMois(index, Y0 + yi, m)] ?? null : null);
   // A partial month is not a complete month: left out of the annual totals (the year becomes estimated).
   const annual = useMemo(() => annualSeries(vals.map((row, yi) => row.map((v, m) => (cellOf(yi, m)?.partiel ? null : v)))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [vals]);
-  const heatMax = useMemo(() => (serie ? heatMaxOf(serie.mois, metrique) : 1), [serie, metrique]);
+  // Country with raw tabs: ONE colour scale for the three tabs (P98 of their pooled complete months), so the jump shows.
+  const heatMax = useMemo(() => {
+    if (!serie) return 1;
+    if (!blocBrut || !brut) return heatMaxOf(serie.mois, metrique);
+    const dernier = brut.mois_partiel === brut.dernier_mois;
+    const v = (["naif_2012", "brut_2020", "harmonise"] as const)
+      .flatMap((s) => (dernier ? blocBrut[s].slice(0, -1) : blocBrut[s]))
+      .filter((x): x is number => x !== null && x > 0).sort((a, b) => a - b);
+    return v.length ? v[Math.min(v.length - 1, Math.floor(v.length * 0.98))] : 1;
+  }, [serie, metrique, blocBrut, brut]);
+  /** Tab captions computed from the data: raw / harmonized ratios over the spliced periods. */
+  const ratioBrut = (s: SerieBrute, de: string, a: string): number | null => {
+    if (!blocBrut || !brut) return null;
+    const o = cleMois(brut.premier_mois), i0 = (cleMois(de).y - o.y) * 12 + cleMois(de).m - o.m, i1 = (cleMois(a).y - o.y) * 12 + cleMois(a).m - o.m;
+    let num = 0, den = 0;
+    for (let i = i0; i <= i1; i++) { num += blocBrut[s][i] ?? 0; den += blocBrut.harmonise[i] ?? 0; }
+    return den > 0 ? num / den : null;
+  };
+  const noteVue = (() => {
+    if (!blocBrut || !brut) return "";
+    const fin = brut.mois_partiel === brut.dernier_mois ? texteMois(cleMois(brut.dernier_mois).y, cleMois(brut.dernier_mois).m - 1) : brut.dernier_mois;
+    const finOk = fin.endsWith("-00") ? `${Number(fin.slice(0, 4)) - 1}-12` : fin;
+    const qte = metrique === "hotspots" ? "counts" : "Σ FRP";
+    if (vueEff === "naif_2012") {
+      const r = ratioBrut("naif_2012", "2012-02", "2020-10");
+      return `Aqua until Jan 2012, then raw VIIRS. Feb 2012 – Oct 2020 the raw VIIRS ${qte} are ×${r?.toFixed(2) ?? "?"} the MODIS-Aqua ${qte}: ${r !== null && Math.abs(r - 1) > 0.2 ? "a sensor artefact (375 m pixels), not more fire." : "the totals are close for this metric."}`;
+    }
+    if (vueEff === "brut_2020") {
+      const r = ratioBrut("brut_2020", "2020-11", finOk);
+      const gap = brut.controle.max_ecart_brut2020_vs_harmonise_avant_bascule[metrique === "hotspots" ? "hotspots" : "frp"];
+      return `Aqua until Oct 2020, then raw VIIRS, not converted. Identical to "Harmonized" before Nov 2020 (max gap ${gap < 0.01 ? "0" : gap.toFixed(2)}); since Nov 2020 the raw ${qte} are ×${r?.toFixed(2) ?? "?"} the harmonized ones.`;
+    }
+    return "VIGIL-K1: VIIRS converted to MODIS-Aqua equivalent since Nov 2020 (80 % band on converted months). Same colour scale on the three tabs.";
+  })();
+  const nomVue = VUES_CAL.find((v) => v.v === vueEff)?.t ?? "Harmonized";
 
   const hexes = useMemo((): HexCollection => {
     if (!index) return { type: "FeatureCollection", features: [] };
     if (selection && zone && zone.serie.source === "h3") return hexDeZone(zone, index, deferredRange, metrique, resCarte);
     if (!moisRows || !moisCarte) return { type: "FeatureCollection", features: [] };
-    const rows = selection ? moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring)) : moisRows;
+    const hp = selection?.region.pays && hexPays?.pays === selection.region.pays ? hexPays.h3 : null;
+    if (selection?.region.pays && !hp) return { type: "FeatureCollection", features: [] }; // country hexagons loading
+    const rows = !selection ? moisRows : hp ? moisRows.filter((r) => hp.has(r.h3)) : moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring));
     return hexDuMois(rows, moisCarte, metrique, resCarte);
-  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte]);
+  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte, hexPays]);
   const mapTotal = useMemo(() => hexes.features.reduce((a, f) => a + (metrique === "hotspots" ? f.properties.n : f.properties.frp), 0), [hexes, metrique]);
   const seuils = index?.seuils_couleur_quantiles?.[metrique === "hotspots" ? "hotspots" : "frp_MW"];
 
@@ -1065,6 +1145,7 @@ export default function Vigil() {
     const m = mapRef.current;
     if (!m) return;
     (m.getSource("hex") as GeoJSONSource | undefined)?.setData(hexRef.current as never);
+    (m.getSource("pts") as GeoJSONSource | undefined)?.setData(ptsRef.current as never);
     (m.getSource("sel") as GeoJSONSource | undefined)?.setData(selFcRef.current as never);
     (m.getSource("draft") as GeoJSONSource | undefined)?.setData(draftRef.current as never);
   }, []);
@@ -1188,6 +1269,18 @@ export default function Vigil() {
             paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.25, 8, 0.8], "line-opacity": 0.55 },
           });
           map.addLayer({ id: "sel-line", type: "line", source: "sel", paint: { "line-color": "#dc2626", "line-width": 2 } });
+          // fire by fire (Greece): MODIS = 1 km pixel (cyan, larger), VIIRS = 375 m (yellow); not counted = grey ring
+          map.addSource("pts", { type: "geojson", data: ptsRef.current as never });
+          map.addLayer({
+            id: "pts", type: "circle", source: "pts",
+            paint: {
+              "circle-radius": ["interpolate", ["linear"], ["zoom"], 5, ["case", ["get", "modis"], 3, 2], 10, ["case", ["get", "modis"], 7, 4.5]],
+              "circle-color": ["case", ["!", ["get", "compte"]], "rgba(0,0,0,0)", ["get", "modis"], "#22d3ee", "#fde047"],
+              "circle-stroke-color": ["case", ["get", "compte"], "#0f172a", "#e2e8f0"],
+              "circle-stroke-width": ["case", ["get", "compte"], 0.8, 1.2],
+              "circle-opacity": 0.95,
+            },
+          });
           map.addLayer({ id: "draft-fill", type: "fill", source: "draft", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#0f172a", "fill-opacity": 0.08 } });
           map.addLayer({ id: "draft-line", type: "line", source: "draft", filter: ["any", ["==", ["geometry-type"], "Polygon"], ["==", ["geometry-type"], "LineString"]], paint: { "line-color": "#0f172a", "line-width": 2, "line-dasharray": [2, 2] } });
           map.addLayer({ id: "draft-pts", type: "circle", source: "draft", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 4.5, "circle-color": "#ffffff", "circle-stroke-color": "#0f172a", "circle-stroke-width": 2 } });
@@ -1202,20 +1295,79 @@ export default function Vigil() {
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
-      // Hexagon popup
-      map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; });
-      map.on("click", "hex", (e: MapLayerMouseEvent) => {
+      // Hexagon tooltip on hover (click also opens it: touch screens)
+      const survol = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 10, className: "hd-popup", maxWidth: "300px" });
+      let ixPays: IndexPays | null = null, ixPaysCharge = false, dernierH3 = "";
+      const montrer = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
+        if (map.getLayer("pts") && map.queryRenderedFeatures(e.point, { layers: ["pts"] }).length) return; // a detection is under the cursor
         const p = e.features[0].properties as { h3: string; n: number; frp: number; months: number; period: string; res: number; c: number };
+        const h = String(p.h3);
+        survol.setLngLat(e.lngLat);
+        if (h === dernierH3 && survol.isOpen()) return;
+        dernierH3 = h;
+        if (!ixPaysCharge) { ixPaysCharge = true; chargerIndexPays().then((x) => { ixPays = x; dernierH3 = ""; }).catch(() => { /* tooltip without country */ }); }
         const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
-        const [lo, la] = centreHex(String(p.h3));
-        const moy = Number(p.months) > 1 ? `<tr><td>Per month</td><td>${fmtVal(Number(p.n) / Number(p.months))}</td></tr>` : "";
-        new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
-          .setLngLat(e.lngLat)
-          .setHTML(`<table><tr><td>Hotspots</td><td>${fmtVal(Number(p.n))} <small>Aqua eq.</small></td></tr>${moy}<tr><td>FRP</td><td>${fmtInt(Number(p.frp))} MW</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>Density</td><td>${fmtVal(Number(p.c))} <small>/ 1,000 km² / month</small></td></tr><tr><td>H3 res ${esc(p.res)}</td><td>${esc(p.h3)}<br><small>${la.toFixed(3)}, ${lo.toFixed(3)}</small></td></tr></table>`)
-          .addTo(map);
-      });
+        const res = Number(p.res), n = Number(p.n), frp = Number(p.frp), months = Number(p.months), c = Number(p.c);
+        const [lo, la] = centreHex(h);
+        // country: FIRMS countries with detections in the res-5 hexagon(s) under this cell (exact, no geocoding guess)
+        let pays = "…";
+        if (ixPays) {
+          const compte = new Map<string, number>();
+          for (const k of res === 5 ? [h] : cellToChildren(h, 5)) for (const nom of paysDeHex(ixPays, k)) compte.set(nom, (compte.get(nom) ?? 0) + 1);
+          const noms = [...compte.entries()].sort((x, y) => y[1] - x[1]).map(([nom]) => nom.replace(/_/g, " "));
+          pays = noms.length ? noms.slice(0, 3).join(", ") + (noms.length > 3 ? ` +${noms.length - 3}` : "") : "—";
+        }
+        const per = String(p.period), mois = per.split(" → ");
+        const bas = indexRef.current?.bascule_viirs.slice(0, 7) ?? "2020-11";
+        const src = mois.every((s) => s < bas) ? "MODIS Aqua, observed" : mois.every((s) => s >= bas) ? "VIIRS converted to Aqua eq." : "Aqua observed, then VIIRS converted";
+        const br = DENS_BREAKS[metriqueRef.current], cls = br.filter((x) => c >= x).length;
+        const row = (k: string, v: string, title = "") => `<tr${title ? ` title="${esc(title)}"` : ""}><td>${k}</td><td>${v}</td></tr>`;
+        survol.setHTML(
+          `<div class="hd-pop-h"><b>${esc(pays)}</b><span>${fmtLat(la)} ${fmtLon(lo)}</span></div><table>` +
+          row("Period", esc(per) + (months > 1 ? ` <small>(${months} months)</small>` : "")) +
+          row("Detections", `${fmtVal(n)} <small>Aqua eq.</small>`, "Harmonized active-fire detections, MODIS-Aqua equivalent (VIGIL-K1), summed over the period") +
+          (months > 1 ? row("Per month", fmtVal(n / months)) : "") +
+          row("Σ FRP", `${fmtVal(frp)} <small>MW</small>`, "Sum of the Fire Radiative Power of the detections, MODIS-Aqua equivalent") +
+          (n > 0 ? row("FRP / detection", `${fmtVal(frp / n)} <small>MW</small>`, "Mean intensity of a detection (Σ FRP / detections)") : "") +
+          row("Density", `<i class="hd-pop-sw" style="background:${HEX_COLORS[cls]}"></i>${fmtVal(c)} <small>/1,000 km²/mo · class ${cls + 1}/12</small>`, "Colour value of the map: per 1,000 km² and per month") +
+          row("Source", src) +
+          row(`H3 res ${res}`, `${TAILLE_RES[res] ?? ""} · ${fmtInt(aireKm2(h))} km²`) +
+          `</table>`,
+        );
+        if (!survol.isOpen()) survol.addTo(map);
+      };
+      map.on("mousemove", "hex", montrer);
+      const montrerPoint = (e: MapLayerMouseEvent) => {
+        if (toolRef.current !== "none" || !map || !e.features?.length) return;
+        const q = e.features[0].properties as { date: string; heure: string; sat: string; dn: string; conf: string; frp: number | null; cat: string; compte: boolean; origine: string; lat: number; lon: number };
+        const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+        const key = `${q.lat},${q.lon},${q.date},${q.heure},${q.sat}`;
+        survol.setLngLat(e.lngLat);
+        if (key === dernierH3 && survol.isOpen()) return;
+        dernierH3 = key;
+        const conf = /^[lnh]$/.test(String(q.conf)) ? ({ l: "low", n: "nominal", h: "high" } as Record<string, string>)[String(q.conf)] : `${q.conf} %`;
+        const row = (k: string, v: string) => `<tr><td>${k}</td><td>${v}</td></tr>`;
+        const frpTxt = q.frp === null || q.frp === undefined || Number.isNaN(Number(q.frp)) ? "n/a" : `${fmtVal(Number(q.frp))} <small>MW, raw (not harmonized)</small>`;
+        const viirs = String(q.sat).startsWith("NOAA") || q.sat === "SNPP";
+        survol.setHTML(
+          `<div class="hd-pop-h"><b>Detection · ${esc(LIB_SAT[q.sat] ?? q.sat)}</b><span>${fmtLat(Number(q.lat))} ${fmtLon(Number(q.lon))}</span></div><table>` +
+          row("Date, time", `${esc(q.date)} ${esc(String(q.heure).slice(0, 2))}:${esc(String(q.heure).slice(2))} <small>UTC · ${q.dn === "D" ? "day" : "night"} pass</small>`) +
+          row("FRP", frpTxt) +
+          row("Confidence", esc(conf)) +
+          row("Status", esc(LIB_CATEGORIE[q.cat] ?? q.cat)) +
+          row("Pixel", viirs ? "375 m (VIIRS)" : "1 km at nadir (MODIS)") +
+          row("Product", esc(q.origine === "sp_annuel" ? "FIRMS standard (archive)" : q.origine)) +
+          `</table>`,
+        );
+        if (!survol.isOpen()) survol.addTo(map);
+      };
+      map.on("mousemove", "pts", montrerPoint);
+      map.on("click", "pts", montrerPoint);
+      map.on("mouseleave", "pts", () => { if (map && toolRef.current === "none") { survol.remove(); dernierH3 = ""; } });
+      map.on("click", "hex", montrer);
+      map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "crosshair"; });
+      map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; survol.remove(); dernierH3 = ""; });
 
       // Polygon tool
       map.on("click", (e) => {
@@ -1280,8 +1432,8 @@ export default function Vigil() {
   colorRef.current = () => {
     const m = mapRef.current;
     if (!m?.getLayer("hex")) return;
-    m.setPaintProperty("hex", "fill-color", hexColorExpr(metrique, resCarte) as never);
-    m.setPaintProperty("hex", "fill-opacity", hexOpacityExpr(metrique, resCarte) as never);
+    m.setPaintProperty("hex", "fill-color", hexColorExpr(metrique) as never);
+    m.setPaintProperty("hex", "fill-opacity", hexOpacityExpr() as never);
   };
   useEffect(() => { colorRef.current(); }, [metrique, resCarte, ready]);
 
@@ -1376,6 +1528,27 @@ export default function Vigil() {
 
   // Data → map
   useEffect(() => { hexRef.current = hexes; pushSources(); }, [hexes, ready, pushSources]);
+  const [nPoints, setNPoints] = useState<{ total: number; comptes: number } | null>(null);
+  useEffect(() => {
+    let vivant = true;
+    const vide = () => { ptsRef.current = EMPTY_FC; setNPoints(null); pushSources(); };
+    if (selection?.region.pays !== PAYS_POINTS || !moisCarte) { vide(); return; }
+    chargerPointsGrece(cleMois(moisCarte).y).then((pts: PointGrece[]) => {
+      if (!vivant) return;
+      const du = pts.filter((q) => q.date.startsWith(moisCarte));
+      ptsRef.current = {
+        type: "FeatureCollection",
+        features: du.sort((a, b) => Number(a.categorie === "retenu_vegetation") - Number(b.categorie === "retenu_vegetation")).map((q) => ({
+          type: "Feature", geometry: { type: "Point", coordinates: [q.lon, q.lat] },
+          properties: { date: q.date, heure: q.heure, sat: q.satellite, dn: q.jourNuit, conf: q.confiance, frp: q.frp, cat: q.categorie,
+            compte: q.categorie === "retenu_vegetation", modis: q.satellite === "Aqua" || q.satellite === "Terra", origine: q.origine, lat: q.lat, lon: q.lon },
+        })),
+      };
+      setNPoints({ total: du.length, comptes: du.filter((q) => q.categorie === "retenu_vegetation").length });
+      pushSources();
+    }).catch((e) => { if (vivant) { console.warn("Greek detections unavailable:", e); vide(); } });
+    return () => { vivant = false; };
+  }, [selection, moisCarte, ready, pushSources]);
   useEffect(() => { pushSources(); }, [selection, ready, pushSources]);
 
   const stepDate = (d: number) => {
@@ -1403,7 +1576,26 @@ export default function Vigil() {
     return d;
   };
   const line = annual.map((p) => p.value);
-  const bascule = index ? new Date(index.bascule_viirs + "T00:00:00Z") : null;
+  /** Year to date: complete months of the last year vs the median of the same months over 2003–2025 (HF8). */
+  const ytd = (() => {
+    const yi = vals.length - 1;
+    if (yi < 0 || !serie) return null;
+    const ms = vals[yi].map((v, m) => (v !== null && !cellOf(yi, m)?.partiel ? m : -1)).filter((m) => m >= 0);
+    if (!ms.length || ms.length === 12) return null;
+    const contigu = ms.every((m, i) => m === ms[0] + i);
+    const tot = ms.reduce((a, m) => a + (vals[yi][m] as number), 0);
+    const base: number[] = [];
+    for (let y = 2003; y <= 2025; y++) {
+      const r = vals[y - Y0];
+      if (!r || ms.some((m) => r[m] === null)) continue;
+      base.push(ms.reduce((a, m) => a + (r[m] as number), 0));
+    }
+    if (base.length < 10) return null;
+    base.sort((p, q) => p - q);
+    const med = quantileHF8(base, 0.5);
+    return { y: Y0 + yi, label: contigu ? `${MONTHS[ms[0]]}–${MONTHS[ms[ms.length - 1]]}` : `${ms.length} months`, tot, med, n: base.length };
+  })();
+  const bascule = index ? new Date((vueEff === "naif_2012" && brut ? brut.bascule_naive : index.bascule_viirs) + "T00:00:00Z") : null;
   const xBascule = bascule ? xAt(bascule.getUTCFullYear() - Y0 + bascule.getUTCMonth() / 12) : null;
   const onChartMove = (e: React.MouseEvent<SVGRectElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -1438,7 +1630,7 @@ export default function Vigil() {
     if (!g) return;
     g.fillStyle = "#ffffff"; g.fillRect(0, 0, cv.width, cv.height);
     g.fillStyle = "#0f172a"; g.font = "bold 13px sans-serif";
-    g.fillText(`Vigil · ${selectionName} · ${metrique === "hotspots" ? "hotspots" : "FRP (MW)"} per month, MODIS-Aqua equivalent`, 8, 18);
+    g.fillText(`Vigil · ${selectionName} · ${metrique === "hotspots" ? "hotspots" : "FRP (MW)"} per month, ${vueEff === "harmonise" ? "MODIS-Aqua equivalent" : `${nomVue} (not converted)`}`, 8, 18);
     g.font = "10px sans-serif"; g.fillStyle = "#64748b";
     g.fillText(`NASA FIRMS MODIS & VIIRS · ${index?.methode ?? "VIGIL-K1"} · log colour scale`, 8, 32);
     MONTHS.forEach((mn, i) => g.fillText(mn[0], left + i * cw + 8, top - 4));
@@ -1496,7 +1688,7 @@ export default function Vigil() {
       ))}
       <div className="hd-heat-legend">
         <span>0</span><i />
-        <span>{serie ? `≥ ${fmtCompact(heatMax)} ${unit(metrique)} / month · log scale, this zone` : zoneProg ? "Loading…" : "No data"}</span>
+        <span>{serie ? `≥ ${heatMax >= 1000 ? fmtCompact(heatMax) : fmtVal(heatMax)} ${vueEff === "harmonise" ? unit(metrique) : metrique === "hotspots" ? "raw detections" : "MW raw"} / month · log scale, this zone${blocBrut ? " · same scale on the 3 tabs" : ""}` : zoneProg ? "Loading…" : "No data"}</span>
         {partiel && <span className="hd-heat-partial"><b />partial month</span>}
       </div>
     </div>
@@ -1599,19 +1791,45 @@ export default function Vigil() {
                 <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
               </>
             )}
-            <span className="hd-mono hd-mapkey-tot">{moisRows === null && !modeH3 ? "…" : `${fmtVal(mapTotal)} ${metrique === "hotspots" ? "hotspots" : "MW"}`}{moisCarte === partiel ? " · partial month" : ""}</span>
+            <span className="hd-mono hd-mapkey-tot">{(() => {
+              if (moisRows === null && !modeH3) return "…";
+              const u = metrique === "hotspots" ? "hotspots" : "MW";
+              if (selection?.region.pays && serie && index && moisCarte) {
+                const c = serie.mois[indiceMois(index, cleMois(moisCarte).y, cleMois(moisCarte).m)];
+                return c ? `${fmtVal(c[metrique])} ${u} (country series)` : "no data";
+              }
+              return `${fmtVal(mapTotal)} ${u}`;
+            })()}{moisCarte === partiel ? " · partial month" : ""}</span>
           </div>
-          <div className="hd-mapkey-row">
-            <span className="hd-ramp-lbl">{fmtVal(DENS_BREAKS[metrique][resCarte][0])}</span>
-            <span className="hd-ramp">
-              {HEX_COLORS.map((c, i) => {
-                const br = DENS_BREAKS[metrique][resCarte];
-                return <i key={c} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
-              })}
+          <div className="hd-mapkey-ramp" role="img" aria-label={`Colour scale: 12 classes from below ${DENS_BREAKS[metrique][0]} to ${DENS_BREAKS[metrique][10]} and more`}>
+            {HEX_COLORS.map((c, i) => {
+              const br = DENS_BREAKS[metrique];
+              return <i key={c} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
+            })}
+          </div>
+          <div className="hd-mapkey-ticks hd-mono" aria-hidden="true">
+            {DENS_BREAKS[metrique].map((v, i) => (i % 2 === 0 ? <span key={v} style={{ left: `${((i + 1) * 100) / 12}%` }}>{v >= 1000 ? `${v / 1000}k` : v}</span> : null))}
+          </div>
+          <div className="hd-mapkey-note">
+            {metrique === "hotspots" ? "Detections (MODIS-Aqua eq.)" : "Σ FRP (MW)"} per 1,000 km² per month · H3 {TAILLE_RES[resCarte]}
+            <span className="hd-mapkey-info" tabIndex={0} aria-label="How the colour classes are built">ⓘ
+              <span className="hd-mapkey-pop" role="tooltip">
+                <b>12 fixed classes, the same at every zoom and month</b>: one colour = one density everywhere, so maps of different months, seasons and zooms compare directly.<br />
+                Breaks grow ×2–2.5 (round numbers): densities span 5 orders of magnitude, a linear scale would leave one colour for 90 % of the map.<br />
+                {metrique === "hotspots"
+                  ? <>Class 3–7 = about <b>one detection</b> in a ~17 km hexagon (153–305 km²): the colour never encodes the hexagon&apos;s size.<br /></>
+                  : null}
+                Checked on 13.5 M hexagon-months (2002-07 → 2026-10): no empty class, none above 28 %. Colour-blind-safe sequential ramp.
+              </span>
             </span>
-            <span className="hd-ramp-lbl">{fmtVal(DENS_BREAKS[metrique][resCarte][DENS_BREAKS[metrique][resCarte].length - 1])}+</span>
           </div>
-          <div className="hd-mapkey-note">{metrique === "hotspots" ? "Hotspots" : "FRP MW"} / 1,000 km² / month · H3 {TAILLE_RES[resCarte]} · 12 equal-frequency classes</div>
+          {selection?.region.pays && <div className="hd-mapkey-note">Map: hexagons with detections of this country (border hexagons also hold the neighbour&apos;s).</div>}
+          {nPoints && (
+            <div className="hd-mapkey-note hd-mapkey-pts">
+              <i style={{ background: "#22d3ee" }} />MODIS <i style={{ background: "#fde047" }} />VIIRS <i className="hollow" />not counted ·
+              {" "}{fmtInt(nPoints.total)} raw detections this month (all satellites, not harmonized), {fmtInt(nPoints.comptes)} counted as vegetation fires
+            </div>
+          )}
           {moisErr && <div className="hd-nodata">Map month unavailable: {moisErr}</div>}
         </div>
       )}
@@ -1674,11 +1892,29 @@ export default function Vigil() {
                     {fmtVal(focusCell[metrique])} {unit(metrique)} · median {fmtVal(focusStat.mediane)}{focusStat.pctMediane !== null ? ` · ${Math.round(focusStat.pctMediane)} % of median` : ""}
                   </div>
                   <div className="hd-median-row hd-mono dim">
-                    percentile {Math.round(focusStat.rang)} ({focusStat.n} yrs) · usual range (P10–P90) {fmtVal(focusStat.p10)}–{fmtVal(focusStat.p90)}
+                    percentile {(() => {
+                      const [lo, hi] = focusCell.converti ? band(focusCell) : [null, null];
+                      const r0 = lo !== null && serie && index ? rangValeur(serie, index, focus.y, focus.m, metrique, lo) : null;
+                      const r1 = hi !== null && serie && index ? rangValeur(serie, index, focus.y, focus.m, metrique, hi) : null;
+                      const v = Math.round(focusStat.rang);
+                      return r0 !== null && r1 !== null && (Math.round(r0) !== v || Math.round(r1) !== v)
+                        ? <span title="Percentile rank of the value, and of the bounds of its 80 % band (converted VIIRS month)">{v} (80 % band: {Math.round(r0)}–{Math.round(r1)})</span>
+                        : <>{v}</>;
+                    })()} ({focusStat.n} yrs) · usual range (P10–P90) {fmtVal(focusStat.p10)}–{fmtVal(focusStat.p90)}
                   </div>
                 </div>
               )}
 
+              {blocBrut && (
+                <div className="hd-calview">
+                  <div className="hd-calview-tabs" role="tablist" aria-label="Calendar series">
+                    {VUES_CAL.map((v) => (
+                      <button key={v.v} role="tab" aria-selected={vueEff === v.v} className={vueEff === v.v ? "on" : ""} onClick={() => setVueCal(v.v)} title={v.def}>{v.t}</button>
+                    ))}
+                  </div>
+                  <p className="hd-calview-note">{noteVue}</p>
+                </div>
+              )}
               {renderCalendar(false)}
               {serie && <button className="hd-rc-apply hd-png" onClick={downloadCalendarPng} aria-label="Download the calendar as a PNG image">Download PNG</button>}
 
@@ -1694,11 +1930,11 @@ export default function Vigil() {
                   {xBascule !== null && (
                     <>
                       <line x1={xBascule} x2={xBascule} y1={mt} y2={mt + ph} stroke="#dc2626" strokeDasharray="3 3" opacity={0.6} />
-                      <text x={xBascule - 4} y={mt + 8} textAnchor="end" className="hd-annot">VIIRS converted →</text>
+                      <text x={xBascule + (vueEff === "naif_2012" ? 4 : -4)} y={mt + 8} textAnchor={vueEff === "naif_2012" ? "start" : "end"} className="hd-annot">{vueEff === "harmonise" ? "VIIRS converted →" : "raw VIIRS →"}</text>
                     </>
                   )}
                   <path d={pathOf(line)} fill="none" stroke="#ea580c" strokeWidth={2.2} strokeLinejoin="round" />
-                  {annual.map((p, i) => p.value !== null && p.est ? <circle key={i} cx={xAt(i)} cy={yAt(p.value)} r={2.6} fill="#fff" stroke="#ea580c" strokeWidth={1.2} /> : null)}
+
                   {hoverYear !== null && line[hoverYear] != null && (
                     <g>
                       <line x1={xAt(hoverYear)} x2={xAt(hoverYear)} y1={mt} y2={mt + ph} stroke="#0f172a" opacity={0.25} />
@@ -1708,8 +1944,13 @@ export default function Vigil() {
                   <rect x={ml} y={mt} width={pw} height={ph} fill="transparent" onMouseMove={onChartMove} onMouseLeave={() => setHoverYear(null)} />
                 </svg>
                 <div className="hd-chart-legend">
-                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>Harmonized, MODIS-Aqua eq.</span>
-                  <span><svg width="8" height="8"><circle cx="4" cy="4" r="2.6" fill="#fff" stroke="#ea580c" strokeWidth="1.2" /></svg>estimated (partial year)</span>
+                  <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>{vueEff === "harmonise" ? "Harmonized, MODIS-Aqua eq." : vueEff === "naif_2012" ? "Raw, naive splice 2012" : "Raw, switch Nov 2020 (not converted)"}</span>
+                  <span className="dim">complete years only</span>
+                  {ytd && (
+                    <span className="hd-mono hd-ytd" title="Year to date: the complete months of the current year, compared with the median (Hyndman–Fan type 8) of the same months over 2003–2025">
+                      {ytd.y} {ytd.label}: {fmtVal(ytd.tot)} · median {fmtVal(ytd.med)} ({ytd.med > 0 ? `${Math.round((100 * ytd.tot) / ytd.med)} %` : "n.d."}, n={ytd.n})
+                    </span>
+                  )}
                   {hoverYear !== null && (
                     <span className="hd-mono hd-hover-read">
                       {Y0 + hoverYear}: {line[hoverYear] != null ? fmtCompact(line[hoverYear]!) : "—"} {unit(metrique)}
@@ -1724,7 +1965,7 @@ export default function Vigil() {
 
       {/* Deep dive: full-screen calendar */}
       {split && selection && (
-        <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
+        <div className="hd-split" role="dialog" aria-label="Analyst dashboard">
           <div className="hd-split-head hd-glass">
             <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
@@ -1732,13 +1973,11 @@ export default function Vigil() {
             </button>
           </div>
           <div className="hd-split-body">
-            <section className="hd-split-pane hd-glass" aria-label="Calendar">
-              <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span>{zoneNote && <span className="hd-zone-note inline">{zoneNote}</span>}</div>
-              <div className="hd-split-cal">{renderCalendar(true)}</div>
-            </section>
             {index && (
-              <section className="hd-split-pane hd-split-analytics hd-glass" aria-label="Analytics">
-                <DeepDive index={index} serie={serie} ring={selection.ring} bbox={selection.region.bbox} y0={Y0} y1={Y1} focus={focus} stat={focusStatHot} />
+              <section className="hd-split-pane hd-dash-pane hd-glass" aria-label="Analyst dashboard">
+                <DeepDive index={index} serie={serie} metrique={metrique} focus={focus} title={selectionName} zoneNote={zoneNote}
+                  ring={selection.ring} bbox={selection.region.bbox}
+                  onPickMonth={(y, m) => setSelRange({ from: { y, m }, to: { y, m } })} />
               </section>
             )}
           </div>
@@ -1749,7 +1988,26 @@ export default function Vigil() {
       {tip && selection && (panelOpen || split) && (
         <div className="hd-tip" style={{ left: Math.max(8, tip.x - 270), top: Math.max(8, tip.y - 12), transform: "translateY(-100%)" }}>
           <div className="hd-tip-title">{texteMois(Y0 + tip.yi, tip.m)}{tipCell?.partiel ? " · partial" : ""}</div>
-          {tipCell ? (
+          {vueEff !== "harmonise" && tipCell ? (() => {
+            const y = Y0 + tip.yi, v = valBrut(y, tip.m, vueEff), h = valBrut(y, tip.m, "harmonise");
+            const aqua = y * 12 + tip.m < (vueEff === "naif_2012" ? 2012 * 12 + 1 : 2020 * 12 + 10);
+            const u = metrique === "hotspots" ? "" : " MW";
+            return (
+              <>
+                <div className="hd-tip-r"><span>{nomVue}</span><b>{v === null ? "no data" : `${fmtVal(v)}${u}`}</b></div>
+                <div className="hd-tip-r"><span>Sensor</span><b>{aqua ? "MODIS Aqua, observed" : VIIRS_BRUT}</b></div>
+                <div className="hd-tip-r"><span>Harmonized</span><b>{h === null ? "—" : `${fmtVal(h)}${u}`}</b></div>
+                {v !== null && h !== null && h > 0 && <div className="hd-tip-r dim"><span>Raw / harmonized</span><b>×{(v / h).toFixed(2)}</b></div>}
+                <div className="hd-tip-sep" />
+                <div className="hd-tip-r dim"><span>Per satellite, raw</span><b /></div>
+                {(["Terra", "Aqua", "SNPP", "NOAA20"] as const).map((s) => {
+                  const x = valBrut(y, tip.m, s);
+                  return x !== null && x > 0 ? <div key={s} className="hd-tip-r dim"><span>{s === "SNPP" ? "S-NPP" : s === "NOAA20" ? "NOAA-20" : s}</span><b>{fmtVal(x)}{u}</b></div> : null;
+                })}
+                {tipCell.partiel && <div className="hd-tip-note">Partial month (data until {brut?.donnees_jusqu_au})</div>}
+              </>
+            );
+          })() : tipCell ? (
             <>
               <div className="hd-tip-r"><span>{metrique === "hotspots" ? "Hotspots" : "FRP"}</span><b>{fmtVal(tipCell[metrique])} {unit(metrique)}</b></div>
               {tipCell.converti ? (() => {
@@ -1763,8 +2021,12 @@ export default function Vigil() {
               )}
               {tipCell.converti && metrique === "frp" && serie?.source === "h3" && <div className="hd-tip-note">FRP band validated at country × month only</div>}
               <div className="hd-tip-r"><span>Source</span><b>{tipCell.converti ? "VIIRS converted" : "MODIS Aqua observed"}</b></div>
+              {tipCell.converti && blocBrut && (() => {
+                const a = valBrut(Y0 + tip.yi, tip.m, "Aqua");
+                return a !== null && a > 0 ? <div className="hd-tip-r dim" title="Aqua still flies after Oct 2020 but its orbit drifts (later overpass, fewer detections): shown as an independent check, not used."><span>Aqua still observed*</span><b>{fmtVal(a)}{metrique === "hotspots" ? "" : " MW"}</b></div> : null;
+              })()}
               <div className="hd-tip-r dim"><span>{metrique === "hotspots" ? "FRP" : "Hotspots"}</span><b>{metrique === "hotspots" ? `${fmtInt(tipCell.frp)} MW` : fmtVal(tipCell.hotspots)}</b></div>
-              {tipCell.couverture !== null && <div className="hd-tip-r dim"><span>Days with data</span><b>{fmtInt(tipCell.couverture)}</b></div>}
+              {tipCell.couverture !== null && !tipCell.partiel && <div className="hd-tip-r dim" title="Share of the month's days with satellite data (global availability, not specific to this zone)"><span>Days with data</span><b>{Math.round(100 * tipCell.couverture)} %</b></div>}
               {tipStat ? (
                 <>
                   <div className="hd-tip-sep" />
@@ -1957,6 +2219,23 @@ const CSS = `
 .hd-mapkey-row button{border:0;background:rgba(15,23,42,.07);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
 .hd-mapkey-tot{color:var(--mut)}
 .hd-mapkey-note{font-size:10px;color:var(--mut)}
+.hd-mapkey-ramp{display:grid;grid-template-columns:repeat(12,1fr);width:264px;height:11px;border-radius:2px;overflow:hidden;box-shadow:inset 0 0 0 1px rgba(15,23,42,.12)}
+.hd-mapkey-ramp i{display:block}
+.hd-mapkey-ticks{position:relative;width:264px;height:12px;font-size:9.5px;color:var(--tx)}
+.hd-mapkey-ticks span{position:absolute;top:0;transform:translateX(-50%);white-space:nowrap}
+.hd-mapkey-info{position:relative;display:inline-block;margin-left:6px;cursor:help;color:var(--tx);font-weight:700;outline:none}
+.hd-mapkey-pop{display:none;position:absolute;left:-8px;bottom:calc(100% + 8px);width:300px;padding:9px 11px;border-radius:10px;background:rgba(15,23,42,.94);color:#f8fafc;font-size:11px;font-weight:400;line-height:1.45;box-shadow:0 10px 30px rgba(15,23,42,.3);z-index:20}
+.hd-mapkey-info:hover .hd-mapkey-pop,.hd-mapkey-info:focus .hd-mapkey-pop,.hd-mapkey-info:focus-within .hd-mapkey-pop{display:block}
+.hd-mapkey-pts{max-width:300px;line-height:1.5}
+.hd-mapkey-pts i{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 4px;vertical-align:0;box-shadow:0 0 0 1px #0f172a}
+.hd-mapkey-pts i.hollow{background:transparent;box-shadow:0 0 0 1.2px #94a3b8}
+.hd-ytd{display:block;width:100%;font-size:10.5px;color:var(--tx);margin-top:2px}
+.hd-calview{display:flex;flex-direction:column;gap:5px;margin:2px 0 4px}
+.hd-calview-tabs{display:flex;gap:3px;padding:3px;border-radius:9px;background:rgba(15,23,42,.06)}
+.hd-calview-tabs button{flex:1;border:0;background:transparent;padding:5px 4px;border-radius:7px;font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;white-space:nowrap}
+.hd-calview-tabs button.on{background:#0f172a;color:#fff}
+.hd-calview-tabs button:focus-visible{outline:2px solid #ea580c;outline-offset:1px}
+.hd-calview-note{margin:0;font-size:10.5px;line-height:1.35;color:var(--mut)}
 .hd-ramp-lbl{font-variant-numeric:tabular-nums}
 /* ── E7 block and PNG button ── */
 .hd-median{margin:0 14px;padding:8px 10px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.6);display:flex;flex-direction:column;gap:3px;font-size:12px}
@@ -1978,5 +2257,9 @@ const CSS = `
 .hd-tip-sep{height:1px;background:rgba(148,163,184,.3);margin:5px 0}
 .hd-tip-note{font-size:10.5px;color:#fbbf24;margin-top:2px}
 .hd-popup small{color:var(--mut);font-weight:400}
+.hd-pop-h{display:flex;justify-content:space-between;gap:12px;align-items:baseline;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--bd)}
+.hd-pop-h span{font-size:11px;color:var(--mut);font-variant-numeric:tabular-nums}
+.hd-pop-sw{display:inline-block;width:9px;height:9px;margin-right:5px;border-radius:2px;vertical-align:-1px;box-shadow:inset 0 0 0 1px rgba(15,23,42,.2)}
+.hd-popup .maplibregl-popup-content{pointer-events:none}
 @media (prefers-reduced-motion:reduce){.hd-root *{transition:none!important}}
 `;

@@ -146,6 +146,84 @@ export const chargerTuile = (parent: string) => {
   return unique(url, async () => decoderTuile(await chargerBinaire(url)));
 };
 
+/**
+ * Raw vs harmonized calendars of one country (pipeline/v2/export_calendrier_brut.py → brut/<pays>.json).
+ * Same cleaned daily tables and same day-by-day satellite rule as the harmonized series; only the conversion differs.
+ * Arrays are aligned month by month from `premier_mois`; null = no data (before Aqua).
+ */
+export type SerieBrute = "naif_2012" | "brut_2020" | "harmonise" | "Terra" | "Aqua" | "SNPP" | "NOAA20";
+export interface CalendrierBrut {
+  pays: string;
+  premier_mois: string;
+  dernier_mois: string;
+  mois_partiel: string | null;
+  donnees_jusqu_au: string;
+  bascule_naive: string;
+  bascule_vigil: string;
+  controle: {
+    max_ecart_brut2020_vs_harmonise_avant_bascule: { hotspots: number; frp: number };
+    ratio_harmonise_sur_viirs_brut_depuis_bascule: { hotspots: number; frp: number };
+  };
+  hotspots: Record<SerieBrute, (number | null)[]>;
+  frp_MW: Record<SerieBrute, (number | null)[]>;
+}
+/** H3 res-5 hexagons holding detections of a country (h3_5/pays/<pays>.bin.gz, sorted uint64 little-endian). */
+export const chargerHexPays = (pays: string) => {
+  const url = `${BASE}/h3_5/pays/${pays}.bin.gz`;
+  return unique(url, async () => {
+    const v = await chargerBinaire(url), s = new Set<string>();
+    for (let o = 0; o + 8 <= v.byteLength; o += 8) s.add(v.getBigUint64(o, true).toString(16));
+    return s;
+  });
+};
+/** Global H3 res-5 → country index (h3_5/pays_index.*): every (hexagon, FIRMS country) pair, sorted by hexagon. */
+export interface IndexPays { noms: string[]; h3: BigUint64Array; code: Uint16Array }
+export const chargerIndexPays = () => {
+  const url = `${BASE}/h3_5/pays_index.bin.gz`;
+  return unique(url, async (): Promise<IndexPays> => {
+    const [j, v] = await Promise.all([chargerJSON<{ pays: string[] }>("h3_5/pays_index.json"), chargerBinaire(url)]);
+    const n = v.getUint32(0, true), o = v.byteOffset + 8;
+    // copies: typed arrays need aligned offsets; browsers are little-endian like the file
+    return { noms: j.pays, h3: new BigUint64Array(v.buffer.slice(o, o + 8 * n)), code: new Uint16Array(v.buffer.slice(o + 8 * n, o + 10 * n)) };
+  });
+};
+/** FIRMS countries of a res-5 hexagon (border hexagons can have two or more). */
+export function paysDeHex(ix: IndexPays, h: string): string[] {
+  const x = BigInt("0x" + h), a = ix.h3;
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < x) lo = mid + 1; else hi = mid; }
+  const out: string[] = [];
+  for (let i = lo; i < a.length && a[i] === x; i++) out.push(ix.noms[ix.code[i]]);
+  return out;
+}
+/** One Greek detection (points_grece/YYYY.csv.gz, contract v2 §2): raw satellite detection, with why it is (not) counted. */
+export interface PointGrece {
+  lat: number; lon: number; date: string; heure: string; satellite: string; jourNuit: string;
+  confiance: string; frp: number | null; categorie: string; compte: boolean; origine: string;
+}
+/** Every Greek detection of one year (a few hundred kB, gzip). */
+export const chargerPointsGrece = (annee: number) => {
+  const url = `${BASE}/points_grece/${annee}.csv.gz`;
+  return unique(url, async (): Promise<PointGrece[]> => {
+    const v = await chargerBinaire(url);
+    const lignes = new TextDecoder().decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).split(/\r?\n/);
+    const tete = lignes[0].split(","), col = (n: string) => tete.indexOf(n);
+    const [la, lo, d, h, s, dn, cf, fr, ca, cc, og] = ["latitude", "longitude", "acq_date", "acq_time", "satellite", "daynight", "confidence", "frp", "categorie", "compte_calendrier", "origine"].map(col);
+    const out: PointGrece[] = [];
+    for (let i = 1; i < lignes.length; i++) {
+      const x = lignes[i].split(",");
+      if (x.length < tete.length) continue;
+      const f = parseFloat(x[fr]);
+      out.push({ lat: +x[la], lon: +x[lo], date: x[d], heure: x[h].padStart(4, "0"), satellite: x[s], jourNuit: x[dn], confiance: x[cf],
+        frp: Number.isFinite(f) ? f : null, categorie: x[ca], compte: x[cc] === "True", origine: x[og] });
+    }
+    return out;
+  });
+};
+/** Countries for which brut/<pays>.json is exported (raw vs harmonized tabs). */
+export const PAYS_BRUT = new Set(["Greece"]);
+export const chargerBrut = (pays: string) => chargerJSON<CalendrierBrut>(`brut/${pays}.json`);
+
 /* ── Months ────────────────────────────────────────────────────────────── */
 
 export const cleMois = (s: string) => { const [y, m] = s.split("-").map(Number); return { y, m: m - 1 }; };
