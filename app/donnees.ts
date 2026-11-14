@@ -264,11 +264,16 @@ export function pip(x: number, y: number, ring: Ring): boolean {
   return inside;
 }
 
+const contourCache = new Map<string, Ring>();
 /** Hexagon outline as a GeoJSON ring, unwrapped so that hexagons on the antimeridian do not span the globe. */
 export function contourHex(h: string): Ring {
+  let r = contourCache.get(h);
+  if (r) return r;
   const b = cellToBoundary(h, true) as Ring;
   const lon0 = b[0][0];
-  return b.map(([lo, la]) => [lo - lon0 > 180 ? lo - 360 : lon0 - lo > 180 ? lo + 360 : lo, la]);
+  r = b.map(([lo, la]) => [lo - lon0 > 180 ? lo - 360 : lon0 - lo > 180 ? lo + 360 : lo, la]);
+  contourCache.set(h, r);
+  return r;
 }
 
 const centres = new Map<string, [number, number]>();
