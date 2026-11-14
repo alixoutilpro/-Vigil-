@@ -1173,7 +1173,45 @@ function CollapseIcon() {
   );
 }
 
+/** Drag a floating panel by its header. Offset is applied as a CSS transform; the header stays on screen. */
+function useDrag() {
+  const ref = useRef<HTMLElement>(null);
+  const [off, setOff] = useState({ x: 0, y: 0 });
+  const start = useRef<{ px: number; py: number; ox: number; oy: number; r: DOMRect } | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button,input,select,a")) return;
+    const el = ref.current;
+    if (!el) return;
+    start.current = { px: e.clientX, py: e.clientY, ox: off.x, oy: off.y, r: el.getBoundingClientRect() };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragging(true);
+  };
+  const onPointerMove = (e: React.PointerEvent<HTMLElement>) => {
+    const s = start.current;
+    if (!s) return;
+    const dx = clamp(e.clientX - s.px, 48 - s.r.right, window.innerWidth - 48 - s.r.left);
+    const dy = clamp(e.clientY - s.py, -s.r.top, window.innerHeight - 40 - s.r.top);
+    setOff({ x: s.ox + dx, y: s.oy + dy });
+  };
+  const end = () => { start.current = null; setDragging(false); };
+
+  return {
+    ref,
+    style: { transform: `translate(${off.x}px, ${off.y}px)` } as React.CSSProperties,
+    dragging,
+    handle: {
+      onPointerDown, onPointerMove, onPointerUp: end, onPointerCancel: end,
+      onDoubleClick: (e: React.MouseEvent) => { if (!(e.target as HTMLElement).closest("button,input,select,a")) setOff({ x: 0, y: 0 }); },
+      title: "Drag to move · double-click to reset",
+    },
+  };
+}
+
 export default function Vigil() {
+  const leftDrag = useDrag();
+  const rightDrag = useDrag();
   const [mode, setMode] = useState<Variant>("raw");
   const metric: Metric = "count";
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -1676,8 +1714,8 @@ export default function Vigil() {
 
       {/* Left panel: Region card */}
       {selection && (
-        <aside className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed")} aria-label="Region settings">
-          <div className="hd-panel-head">
+        <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
+          <div className="hd-panel-head" {...leftDrag.handle}>
             <span className="hd-mono hd-name">{selectionName}</span>
             <button className="hd-icon" onClick={() => setPanelLeftOpen(!panelLeftOpen)} aria-label={panelLeftOpen ? "Collapse region panel" : "Expand region panel"} aria-expanded={panelLeftOpen}>
               <svg width="12" height="12" viewBox="0 0 14 14"><path d={panelLeftOpen ? "M2 5l5 5 5-5" : "M2 9l5-5 5 5"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" /></svg>
@@ -1700,8 +1738,8 @@ export default function Vigil() {
 
       {/* Analytics panel */}
       {selection && (
-        <aside className={"hd-panel" + (panelOpen ? "" : " collapsed")} aria-label="Analytics">
-          <div className="hd-panel-head">
+        <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
+          <div className="hd-panel-head" {...rightDrag.handle}>
             <div className="hd-head-actions">
               <button className="hd-icon" onClick={() => setSplit(true)} aria-label="Deep dive: calendar full screen" title="Deep dive">
                 <ExpandIcon />
@@ -1843,8 +1881,10 @@ const CSS = `
   background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
 .hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
 .hd-panel-left .hd-region-card{border-bottom:0}
-.hd-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
+.hd-panel-head{cursor:grab;touch-action:none;user-select:none;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
 .hd-name{font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:11px}
+.dragging .hd-panel-head{cursor:grabbing}
+.hd-panel.dragging,.hd-panel-left.dragging{box-shadow:0 10px 36px rgba(15,23,42,.28)}
 .hd-icon{border:0;background:transparent;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;padding:0;color:var(--tx)}
 .hd-icon:hover{background:rgba(15,23,42,.07)}
 .hd-panel-body{overflow:auto;padding:4px 0 14px;display:flex;flex-direction:column;gap:12px}
