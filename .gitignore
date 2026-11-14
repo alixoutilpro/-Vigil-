@@ -16,3 +16,6 @@ data/processed/
 .env
 *.parquet
 data/raw/**/*.csv
+
+# build caches (rewritten by every build: never commit, they cause merge conflicts)
+*.tsbuildinfo

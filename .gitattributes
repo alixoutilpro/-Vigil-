@@ -1,0 +1,5 @@
+# Same line endings for everyone (Windows and Mac): LF in the repository
+* text=auto eol=lf
+*.gz binary
+*.parquet binary
+*.png binary
