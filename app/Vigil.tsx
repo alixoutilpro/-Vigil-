@@ -148,6 +148,156 @@ export const REGIONS: RegionDef[] = [
 ];
 
 /* ────────────────────────────────────────────────────────────────────────── */
+/* Country search data  [latMin, latMax, lonMin, lonMax]                       */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+const COUNTRIES: Array<{ name: string; bbox: [number, number, number, number] }> = [
+  { name: "Afghanistan", bbox: [29.4, 38.5, 60.5, 74.9] },
+  { name: "Albania", bbox: [39.6, 42.7, 19.3, 21.1] },
+  { name: "Algeria", bbox: [18.9, 37.1, -8.7, 12.0] },
+  { name: "Angola", bbox: [-18.1, -4.4, 11.6, 24.1] },
+  { name: "Argentina", bbox: [-55.1, -21.8, -73.6, -53.6] },
+  { name: "Armenia", bbox: [38.8, 41.3, 43.4, 46.6] },
+  { name: "Australia", bbox: [-43.7, -10.7, 113.3, 153.6] },
+  { name: "Austria", bbox: [46.4, 49.0, 9.5, 17.2] },
+  { name: "Azerbaijan", bbox: [38.4, 41.9, 44.8, 50.4] },
+  { name: "Bangladesh", bbox: [20.6, 26.6, 88.0, 92.7] },
+  { name: "Belarus", bbox: [51.3, 56.2, 23.2, 32.8] },
+  { name: "Belgium", bbox: [49.5, 51.5, 2.5, 6.4] },
+  { name: "Benin", bbox: [6.2, 12.4, 0.8, 3.9] },
+  { name: "Bolivia", bbox: [-22.9, -9.7, -69.6, -57.5] },
+  { name: "Bosnia and Herzegovina", bbox: [42.6, 45.3, 15.7, 19.6] },
+  { name: "Botswana", bbox: [-26.9, -17.8, 19.9, 29.4] },
+  { name: "Brazil", bbox: [-33.8, 5.3, -73.1, -29.3] },
+  { name: "Bulgaria", bbox: [41.2, 44.2, 22.4, 28.6] },
+  { name: "Burkina Faso", bbox: [9.4, 15.1, -5.5, 2.4] },
+  { name: "Burundi", bbox: [-4.5, -2.3, 29.0, 30.9] },
+  { name: "Cambodia", bbox: [10.4, 14.7, 102.3, 107.6] },
+  { name: "Cameroon", bbox: [1.6, 13.1, 8.5, 16.2] },
+  { name: "Canada", bbox: [41.7, 83.1, -141.0, -52.6] },
+  { name: "Central African Republic", bbox: [2.2, 11.0, 14.4, 27.5] },
+  { name: "Chad", bbox: [7.5, 23.5, 13.5, 24.0] },
+  { name: "Chile", bbox: [-55.9, -17.5, -75.7, -66.4] },
+  { name: "China", bbox: [18.2, 53.6, 73.5, 134.8] },
+  { name: "Colombia", bbox: [-4.2, 13.4, -79.0, -66.9] },
+  { name: "Congo", bbox: [-5.0, 3.7, 11.2, 18.6] },
+  { name: "Costa Rica", bbox: [8.0, 11.2, -85.9, -82.6] },
+  { name: "Croatia", bbox: [42.4, 46.6, 13.5, 19.5] },
+  { name: "Cuba", bbox: [19.8, 23.3, -85.0, -74.1] },
+  { name: "Czech Republic", bbox: [48.6, 51.1, 12.1, 18.9] },
+  { name: "Democratic Republic of Congo", bbox: [-13.5, 5.4, 12.2, 31.3] },
+  { name: "Denmark", bbox: [54.6, 57.8, 8.1, 15.2] },
+  { name: "Dominican Republic", bbox: [17.5, 20.0, -72.0, -68.3] },
+  { name: "Ecuador", bbox: [-5.0, 1.5, -81.0, -75.2] },
+  { name: "Egypt", bbox: [22.0, 31.7, 24.7, 37.1] },
+  { name: "El Salvador", bbox: [13.1, 14.5, -90.1, -87.7] },
+  { name: "Ethiopia", bbox: [3.4, 15.0, 33.0, 48.0] },
+  { name: "Finland", bbox: [59.8, 70.1, 19.1, 31.6] },
+  { name: "France", bbox: [41.3, 51.1, -5.1, 9.6] },
+  { name: "Gabon", bbox: [-3.9, 2.3, 8.7, 14.5] },
+  { name: "Georgia", bbox: [41.1, 43.6, 40.0, 46.7] },
+  { name: "Germany", bbox: [47.3, 55.1, 5.9, 15.0] },
+  { name: "Ghana", bbox: [4.7, 11.2, -3.3, 1.2] },
+  { name: "Greece", bbox: [34.8, 41.7, 19.4, 28.3] },
+  { name: "Guatemala", bbox: [13.7, 17.8, -92.3, -88.2] },
+  { name: "Guinea", bbox: [7.2, 12.7, -15.1, -7.6] },
+  { name: "Haiti", bbox: [18.0, 20.1, -74.5, -71.6] },
+  { name: "Honduras", bbox: [13.0, 16.5, -89.4, -83.2] },
+  { name: "Hungary", bbox: [45.7, 48.6, 16.1, 22.9] },
+  { name: "India", bbox: [6.8, 35.5, 68.1, 97.4] },
+  { name: "Indonesia", bbox: [-11.0, 6.1, 95.0, 141.0] },
+  { name: "Iran", bbox: [25.1, 39.8, 44.0, 63.3] },
+  { name: "Iraq", bbox: [29.1, 37.4, 38.8, 48.6] },
+  { name: "Ireland", bbox: [51.4, 55.4, -10.5, -6.0] },
+  { name: "Israel", bbox: [29.5, 33.3, 34.3, 35.9] },
+  { name: "Italy", bbox: [36.6, 47.1, 6.6, 18.5] },
+  { name: "Ivory Coast", bbox: [4.3, 10.7, -8.6, -2.5] },
+  { name: "Jamaica", bbox: [17.7, 18.5, -78.4, -76.2] },
+  { name: "Japan", bbox: [24.0, 45.5, 122.9, 145.8] },
+  { name: "Jordan", bbox: [29.2, 33.4, 35.0, 39.3] },
+  { name: "Kazakhstan", bbox: [40.6, 55.4, 50.3, 87.4] },
+  { name: "Kenya", bbox: [-4.7, 5.0, 33.9, 42.0] },
+  { name: "Kosovo", bbox: [41.9, 43.3, 20.0, 21.8] },
+  { name: "Kuwait", bbox: [28.5, 30.1, 46.6, 48.4] },
+  { name: "Kyrgyzstan", bbox: [39.2, 43.3, 69.3, 80.3] },
+  { name: "Laos", bbox: [13.9, 22.5, 100.1, 107.7] },
+  { name: "Latvia", bbox: [55.7, 58.1, 21.0, 28.2] },
+  { name: "Lebanon", bbox: [33.1, 34.7, 35.1, 36.6] },
+  { name: "Libya", bbox: [19.5, 33.2, 9.4, 25.2] },
+  { name: "Lithuania", bbox: [53.9, 56.5, 20.9, 26.9] },
+  { name: "Madagascar", bbox: [-25.6, -11.9, 43.2, 50.5] },
+  { name: "Malawi", bbox: [-17.1, -9.4, 32.7, 35.9] },
+  { name: "Malaysia", bbox: [0.9, 7.4, 99.6, 119.3] },
+  { name: "Mali", bbox: [10.1, 25.0, -4.2, 4.3] },
+  { name: "Mauritania", bbox: [14.7, 27.3, -17.1, -4.8] },
+  { name: "Mexico", bbox: [14.5, 32.7, -117.1, -86.7] },
+  { name: "Moldova", bbox: [45.5, 48.5, 26.6, 30.1] },
+  { name: "Mongolia", bbox: [41.6, 52.1, 87.7, 119.9] },
+  { name: "Morocco", bbox: [27.7, 35.9, -13.2, -1.1] },
+  { name: "Mozambique", bbox: [-26.9, -10.5, 32.3, 40.9] },
+  { name: "Myanmar", bbox: [9.8, 28.5, 92.2, 101.2] },
+  { name: "Namibia", bbox: [-29.1, -16.9, 11.7, 25.3] },
+  { name: "Nepal", bbox: [26.3, 30.5, 80.1, 88.2] },
+  { name: "Netherlands", bbox: [50.8, 53.6, 3.3, 7.2] },
+  { name: "New Zealand", bbox: [-47.3, -34.4, 166.4, 178.6] },
+  { name: "Nicaragua", bbox: [10.7, 15.0, -87.7, -83.1] },
+  { name: "Niger", bbox: [11.7, 23.5, 0.2, 15.9] },
+  { name: "Nigeria", bbox: [4.3, 13.9, 2.7, 14.7] },
+  { name: "North Korea", bbox: [37.7, 42.7, 124.2, 130.7] },
+  { name: "North Macedonia", bbox: [40.9, 42.4, 20.5, 23.1] },
+  { name: "Norway", bbox: [57.9, 71.2, 4.6, 31.1] },
+  { name: "Oman", bbox: [16.6, 26.4, 52.0, 59.8] },
+  { name: "Pakistan", bbox: [23.7, 37.1, 60.9, 77.1] },
+  { name: "Palestine", bbox: [31.2, 32.6, 34.2, 35.6] },
+  { name: "Panama", bbox: [7.2, 9.7, -83.1, -77.2] },
+  { name: "Papua New Guinea", bbox: [-11.7, -1.3, 141.0, 155.7] },
+  { name: "Paraguay", bbox: [-27.6, -19.3, -62.6, -54.3] },
+  { name: "Peru", bbox: [-18.4, -0.1, -81.3, -68.7] },
+  { name: "Philippines", bbox: [4.6, 21.1, 116.9, 126.6] },
+  { name: "Poland", bbox: [49.0, 54.9, 14.1, 24.1] },
+  { name: "Portugal", bbox: [36.8, 42.2, -9.5, -6.2] },
+  { name: "Romania", bbox: [43.6, 48.3, 20.3, 29.7] },
+  { name: "Russia", bbox: [41.2, 81.9, 19.6, 180.0] },
+  { name: "Rwanda", bbox: [-2.8, -1.1, 28.9, 30.9] },
+  { name: "Saudi Arabia", bbox: [16.4, 32.2, 34.6, 55.7] },
+  { name: "Senegal", bbox: [12.3, 16.7, -17.5, -11.4] },
+  { name: "Serbia", bbox: [42.2, 46.2, 18.8, 23.0] },
+  { name: "Sierra Leone", bbox: [6.9, 10.0, -13.3, -10.3] },
+  { name: "Slovakia", bbox: [47.7, 49.6, 16.8, 22.6] },
+  { name: "Slovenia", bbox: [45.4, 46.9, 13.4, 16.6] },
+  { name: "Somalia", bbox: [-1.7, 11.5, 40.9, 51.5] },
+  { name: "South Africa", bbox: [-34.8, -22.1, 16.5, 32.9] },
+  { name: "South Korea", bbox: [33.1, 38.6, 125.1, 129.6] },
+  { name: "South Sudan", bbox: [3.5, 12.2, 23.9, 35.9] },
+  { name: "Spain", bbox: [35.9, 43.8, -9.3, 4.3] },
+  { name: "Sri Lanka", bbox: [5.9, 9.8, 79.7, 81.9] },
+  { name: "Sudan", bbox: [8.7, 22.2, 21.8, 38.6] },
+  { name: "Sweden", bbox: [55.3, 69.1, 11.1, 24.2] },
+  { name: "Switzerland", bbox: [45.8, 47.8, 6.0, 10.5] },
+  { name: "Syria", bbox: [32.3, 37.3, 35.7, 42.4] },
+  { name: "Taiwan", bbox: [21.9, 25.3, 120.0, 122.0] },
+  { name: "Tajikistan", bbox: [36.7, 41.0, 67.4, 75.2] },
+  { name: "Tanzania", bbox: [-11.7, -1.0, 29.3, 40.4] },
+  { name: "Thailand", bbox: [5.6, 20.5, 97.4, 105.7] },
+  { name: "Togo", bbox: [5.9, 11.1, -0.1, 1.8] },
+  { name: "Tunisia", bbox: [30.2, 37.5, 7.5, 11.6] },
+  { name: "Turkey", bbox: [35.8, 42.1, 25.7, 44.8] },
+  { name: "Turkmenistan", bbox: [35.1, 42.8, 52.4, 66.7] },
+  { name: "Uganda", bbox: [-1.5, 4.2, 29.5, 35.0] },
+  { name: "Ukraine", bbox: [44.4, 52.4, 22.1, 40.2] },
+  { name: "United Arab Emirates", bbox: [22.6, 26.1, 51.6, 56.4] },
+  { name: "United Kingdom", bbox: [49.9, 60.9, -8.6, 1.8] },
+  { name: "United States", bbox: [24.5, 49.4, -124.8, -66.9] },
+  { name: "Uruguay", bbox: [-34.9, -30.1, -58.4, -53.1] },
+  { name: "Uzbekistan", bbox: [37.2, 45.6, 55.9, 73.1] },
+  { name: "Venezuela", bbox: [0.7, 12.2, -73.4, -59.8] },
+  { name: "Vietnam", bbox: [8.6, 23.4, 102.1, 109.5] },
+  { name: "Yemen", bbox: [12.5, 19.0, 42.6, 54.0] },
+  { name: "Zambia", bbox: [-18.1, -8.2, 22.0, 33.7] },
+  { name: "Zimbabwe", bbox: [-22.4, -15.6, 25.2, 33.1] },
+];
+
+/* ────────────────────────────────────────────────────────────────────────── */
 /* Utilities                                                                  */
 /* ────────────────────────────────────────────────────────────────────────── */
 
@@ -671,21 +821,11 @@ function Seg<T extends string>(props: { label: string; value: T; options: { v: T
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/* RegionAnalysisSlot — placeholder for future region report                 */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-function RegionAnalysisSlot(_props: { region: RegionDef; range: DateRange }) {
-  return (
-    <div className="hd-analysis-slot">
-      <div className="hd-analysis-title">Analysis</div>
-      <p className="hd-analysis-soon">Coming soon: region report for firefighters and land managers</p>
-    </div>
-  );
-}
-
-/* ────────────────────────────────────────────────────────────────────────── */
 /* RegionCard                                                                 */
 /* ────────────────────────────────────────────────────────────────────────── */
+
+const bboxToSizeKm = (bbox: [number, number, number, number]) =>
+  Math.round((bbox[1] - bbox[0]) * 111.32 * 10) / 10;
 
 interface RegionCardProps {
   selection: { region: RegionDef; ring: Ring; wasPolygon: boolean };
@@ -714,42 +854,36 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
   };
   const cancelRename = () => { setNameInput(name); setRenaming(false); };
 
-  /* ── Bbox inputs ── */
-  const [lat0, setLat0] = useState(region.bbox[0].toFixed(2));
-  const [lat1, setLat1] = useState(region.bbox[1].toFixed(2));
-  const [lon0, setLon0] = useState(region.bbox[2].toFixed(2));
-  const [lon1, setLon1] = useState(region.bbox[3].toFixed(2));
-  const [bboxErr, setBboxErr] = useState({ lat0: "", lat1: "", lon0: "", lon1: "" });
+  /* ── Bbox inputs (lon max, lat max, size in km) ── */
+  const [latMax, setLatMax] = useState(region.bbox[1].toFixed(2));
+  const [lonMax, setLonMax] = useState(region.bbox[3].toFixed(2));
+  const [sizeKm, setSizeKm] = useState(bboxToSizeKm(region.bbox).toFixed(1));
+  const [bboxErr, setBboxErr] = useState({ latMax: "", lonMax: "", sizeKm: "" });
 
   useEffect(() => {
-    setLat0(region.bbox[0].toFixed(2));
-    setLat1(region.bbox[1].toFixed(2));
-    setLon0(region.bbox[2].toFixed(2));
-    setLon1(region.bbox[3].toFixed(2));
-    setBboxErr({ lat0: "", lat1: "", lon0: "", lon1: "" });
+    setLatMax(region.bbox[1].toFixed(2));
+    setLonMax(region.bbox[3].toFixed(2));
+    setSizeKm(bboxToSizeKm(region.bbox).toFixed(1));
+    setBboxErr({ latMax: "", lonMax: "", sizeKm: "" });
   }, [region.bbox]);
 
   const validateAndApplyBbox = () => {
-    const v0 = parseFloat(lat0), v1 = parseFloat(lat1), v2 = parseFloat(lon0), v3 = parseFloat(lon1);
-    const e = { lat0: "", lat1: "", lon0: "", lon1: "" };
-    if (isNaN(v0) || v0 < -90 || v0 > 90) e.lat0 = "Lat min must be between −90 and 90";
-    if (isNaN(v1) || v1 < -90 || v1 > 90) e.lat1 = "Lat max must be between −90 and 90";
-    if (isNaN(v2) || v2 < -180 || v2 > 180) e.lon0 = "Lon min must be between −180 and 180";
-    if (isNaN(v3) || v3 < -180 || v3 > 180) e.lon1 = "Lon max must be between −180 and 180";
-    if (!e.lat0 && !e.lat1 && v0 >= v1) e.lat0 = "Lat min must be lower than Lat max";
-    if (!e.lon0 && !e.lon1 && v2 >= v3) e.lon0 = "Lon min must be lower than Lon max";
+    const lat1 = parseFloat(latMax), lon1 = parseFloat(lonMax), sz = parseFloat(sizeKm);
+    const e = { latMax: "", lonMax: "", sizeKm: "" };
+    if (isNaN(lat1) || lat1 < -90 || lat1 > 90) e.latMax = "Must be −90 to 90";
+    if (isNaN(lon1) || lon1 < -180 || lon1 > 180) e.lonMax = "Must be −180 to 180";
+    if (isNaN(sz) || sz <= 0 || sz > 20000) e.sizeKm = "Must be 1–20 000";
     setBboxErr(e);
-    if (!e.lat0 && !e.lat1 && !e.lon0 && !e.lon1) onApplyBbox([v0, v1, v2, v3], name);
+    if (!e.latMax && !e.lonMax && !e.sizeKm) {
+      const latSpan = sz / 111.32;
+      const lonSpan = sz / (111.32 * Math.cos(lat1 * Math.PI / 180));
+      const lat0 = Math.max(-90, lat1 - latSpan);
+      const lon0 = lon1 - lonSpan;
+      onApplyBbox([lat0, lat1, lon0, lon1], name);
+    }
   };
 
   const hasErr = Object.values(bboxErr).some(Boolean);
-
-  const bboxFields: Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string }> = [
-    { id: "lat0", label: "Lat min", val: lat0, onChange: setLat0, err: bboxErr.lat0 },
-    { id: "lat1", label: "Lat max", val: lat1, onChange: setLat1, err: bboxErr.lat1 },
-    { id: "lon0", label: "Lon min", val: lon0, onChange: setLon0, err: bboxErr.lon0 },
-    { id: "lon1", label: "Lon max", val: lon1, onChange: setLon1, err: bboxErr.lon1 },
-  ];
 
   /* ── Date range ── */
   const toMonthStr = (y: number, m: number) => `${y}-${String(m + 1).padStart(2, "0")}`;
@@ -840,14 +974,18 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         {wasPolygon && (
           <p className="hd-rc-note">Editing coordinates converts the polygon to a rectangle</p>
         )}
-        <div className="hd-rc-grid4">
-          {bboxFields.map(({ id, label, val, onChange, err }) => (
+        <div className="hd-rc-grid3">
+          {([
+            { id: "lonMax", label: "Lon max", val: lonMax, onChange: setLonMax, err: bboxErr.lonMax, step: "0.01" },
+            { id: "latMax", label: "Lat max", val: latMax, onChange: setLatMax, err: bboxErr.latMax, step: "0.01" },
+            { id: "sizeKm", label: "Size (km)", val: sizeKm, onChange: setSizeKm, err: bboxErr.sizeKm, step: "1" },
+          ] as Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string; step: string }>).map(({ id, label, val, onChange, err, step }) => (
             <div key={id} className="hd-rc-field">
               <label htmlFor={`hd-bbox-${id}`} className="hd-rc-fieldlabel">{label}</label>
               <input
                 id={`hd-bbox-${id}`}
                 type="number"
-                step="0.01"
+                step={step}
                 className={"hd-rc-fieldinput" + (err ? " err" : "")}
                 value={val}
                 aria-describedby={err ? `hd-bbox-${id}-err` : undefined}
@@ -900,16 +1038,12 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
       </div>
 
-      {/* 4. Analysis slot */}
-      <RegionAnalysisSlot region={region} range={range} />
-
-      {/* 5. Export CSV */}
+      {/* 4. Export CSV */}
       <div className="hd-rc-section">
         <button className="hd-rc-export" aria-label="Export hotspots as CSV" onClick={handleExport}>
           Export CSV
         </button>
         {exportErr && <p role="alert" className="hd-rc-fielderr" style={{ marginTop: 6 }}>{exportErr}</p>}
-        <p className="hd-rc-simnote">Demo data — not real FIRMS detections</p>
       </div>
     </div>
   );
@@ -958,8 +1092,12 @@ export default function Vigil() {
   const [ready, setReady] = useState(false);
   const [tip, setTip] = useState<{ x: number; y: number; yi: number; m: number } | null>(null);
   const [hoverYear, setHoverYear] = useState<number | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const hotRef = useRef<HotCollection>({ type: "FeatureCollection", features: [] });
   const selFcRef = useRef<unknown>(EMPTY_FC);
@@ -1291,7 +1429,37 @@ export default function Vigil() {
 
   const bb = region.bbox;
   const sgn = (v: number) => (v >= 0 ? "+" : "−");
-  void bb; void sgn; // used in future geo display
+  void bb; void sgn;
+
+  /* ── Country search ── */
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [] as typeof COUNTRIES;
+    return COUNTRIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [searchQuery]);
+
+  const selectCountry = useCallback((c: { name: string; bbox: [number, number, number, number] }) => {
+    const ring = rectRing(c.bbox);
+    applySelection(regionFromRing(ring), ring, c.name, false);
+    setSearchOpen(false);
+    setSearchQuery("");
+  }, [applySelection]);
+
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setSearchOpen(false);
+        setSearchQuery("");
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [searchOpen]);
 
   return (
     <div className="hd-root">
@@ -1301,6 +1469,47 @@ export default function Vigil() {
       {/* Toolbar */}
       <div className="hd-toolbar">
         <span className="hd-word">Vigil</span>
+
+        {/* Country search */}
+        <div className="hd-search" ref={searchRef}>
+          {!searchOpen ? (
+            <button className="hd-search-toggle" onClick={() => setSearchOpen(true)} aria-label="Search country">
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <circle cx="6" cy="6" r="4.5" />
+                <line x1="9.5" y1="9.5" x2="13" y2="13" />
+              </svg>
+            </button>
+          ) : (
+            <>
+              <div className="hd-search-inner">
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                  <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
+                </svg>
+                <input
+                  ref={searchInputRef}
+                  className="hd-search-input"
+                  placeholder="Search country…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Escape") { setSearchOpen(false); setSearchQuery(""); } }}
+                />
+                {searchQuery && (
+                  <button className="hd-search-clear" onClick={() => setSearchQuery("")} aria-label="Clear">×</button>
+                )}
+              </div>
+              {searchMatches.length > 0 && (
+                <div className="hd-search-dropdown">
+                  {searchMatches.map((c) => (
+                    <button key={c.name} className="hd-search-result" onClick={() => selectCountry(c)}>
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
         <div className="hd-group">
           <button className={"hd-btn" + (tool === "box" ? " on" : "")} onClick={() => pickTool("box")}>Box</button>
           <button className={"hd-btn" + (tool === "poly" ? " on" : "")} onClick={() => pickTool("poly")}>Polygon</button>
@@ -1499,7 +1708,7 @@ const CSS = `
 .hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
   background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
 .hd-panel-left{position:absolute;left:12px;top:70px;bottom:100px;z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
-  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+  background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
 .hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 14px;display:flex;flex-direction:column;gap:0}
 .hd-panel-left .hd-region-card{border-bottom:0}
 .hd-panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
@@ -1511,6 +1720,18 @@ const CSS = `
 .hd-panel-body .hd-seg button{flex:1;padding:5px 8px;font-size:12px;border-radius:5px}
 .hd-panel-body .hd-heat{margin:0 14px}
 .hd-panel-body .hd-chart-wrap{margin:0 14px}
+
+.hd-search{position:relative;display:flex;flex-direction:column}
+.hd-search-toggle{border:0;background:transparent;width:30px;height:30px;display:grid;place-items:center;border-radius:6px;color:var(--tx);cursor:pointer}
+.hd-search-toggle:hover{background:rgba(15,23,42,.07)}
+.hd-search-inner{display:flex;align-items:center;gap:6px;padding:3px 6px 3px 10px}
+.hd-search-input{border:0;background:transparent;outline:none;font:inherit;font-size:12px;color:var(--tx);width:155px}
+.hd-search-input::placeholder{color:var(--mut)}
+.hd-search-clear{border:0;background:transparent;padding:1px 5px;border-radius:5px;color:var(--mut);font-size:14px;line-height:1;cursor:pointer}
+.hd-search-clear:hover{color:var(--tx)}
+.hd-search-dropdown{position:absolute;top:calc(100% + 4px);left:0;min-width:100%;background:rgba(255,255,255,.96);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-radius:8px;box-shadow:0 6px 24px rgba(15,23,42,.16);overflow:hidden;z-index:20}
+.hd-search-result{display:block;width:100%;border:0;background:transparent;text-align:left;padding:7px 12px;font-size:12px;color:var(--tx);cursor:pointer;white-space:nowrap}
+.hd-search-result:hover{background:rgba(15,23,42,.06)}
 
 .hd-heat{display:grid;grid-template-columns:26px repeat(12,minmax(0,1fr));gap:1px;user-select:none}
 .hd-heat-col{font-size:9px;color:var(--mut);text-align:center;line-height:1.2}
@@ -1568,7 +1789,7 @@ const CSS = `
 .hd-rc-rename:hover{background:rgba(15,23,42,.07);color:var(--tx)}
 .hd-rc-section{display:flex;flex-direction:column;gap:6px}
 .hd-rc-seclabel{font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)}
-.hd-rc-grid4{display:grid;grid-template-columns:1fr 1fr;gap:5px 10px}
+.hd-rc-grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:5px 8px}
 .hd-rc-field{display:flex;flex-direction:column;gap:2px}
 .hd-rc-fieldlabel{font-size:10px;color:var(--mut)}
 .hd-rc-fieldinput{background:var(--bg2);border:1px solid var(--bd);border-radius:5px;padding:4px 7px;font:inherit;font-size:12px;color:var(--tx);outline:none;width:100%}
