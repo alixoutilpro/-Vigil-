@@ -587,6 +587,8 @@ interface RegionCardProps {
   onExportPoints: (() => Promise<{ csv: string; n: number } | null>) | null;
   /** False while the zone is loading. */
   ready: boolean;
+  /** Dashboard only: draw the zone on the map (box or polygon); the dashboard reopens on the new zone. */
+  onDraw?: (t: "box" | "poly") => void;
 }
 
 /** Region name with its Rename button, shown once in the panel header. */
@@ -639,7 +641,7 @@ function RegionName({ name, onRename }: { name: string; onRename: (name: string)
   );
 }
 
-function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, onExportPoints, ready }: RegionCardProps) {
+function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, onExportPoints, ready, onDraw }: RegionCardProps) {
   const bboxSel = selection?.region.bbox ?? null;
   const wasPolygon = !!selection?.wasPolygon;
 
@@ -808,6 +810,15 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
         >
           Apply
         </button>
+        {onDraw && (
+          <div className="hd-rc-draw">
+            <span className="hd-rc-seclabel">Draw on the map</span>
+            <div className="hd-rc-draw-btns">
+              <button className="hd-rc-apply" onClick={() => onDraw("box")} title="Drag a rectangle on the map; the dashboard reopens on it">Box</button>
+              <button className="hd-rc-apply" onClick={() => onDraw("poly")} title="Click the vertices of the zone on the map, close it on the first vertex, by double-click or Enter; the dashboard reopens on it">Polygon</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 4. Study period */}
@@ -981,6 +992,11 @@ export default function Vigil() {
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
+  /** Focus month picked in the dashboard calendar (kept only while it lies inside the study period). */
+  const [focusPick, setFocusPick] = useState<{ y: number; m: number } | null>(null);
+  /** The zone is being drawn from the dashboard: reopen it on the new zone (or on Esc). */
+  const retourDash = useRef(false);
+  const dashSearchRef = useRef<HTMLInputElement>(null);
   /** Raw vs harmonized calendars (country mode, PAYS_BRUT only) and the tab shown. */
   const [brut, setBrut] = useState<CalendrierBrut | null>(null);
   const [vueCal, setVueCal] = useState<VueCal>("harmonise");
@@ -1079,6 +1095,8 @@ export default function Vigil() {
       .catch((e) => { if (vivant) { setHexPays(null); console.warn("Country hexagons unavailable:", e); } });
     return () => { vivant = false; };
   }, [selection]);
+
+  useEffect(() => { setFocusPick(null); }, [selection]);
 
   /* ── Raw vs harmonized calendars of the selected country, when exported (brut/<pays>.json) ── */
   useEffect(() => {
@@ -1252,10 +1270,20 @@ export default function Vigil() {
     const closed: Ring = [...ring, ring[0]];
     regionCounterRef.current += 1;
     const name = `Region ${regionCounterRef.current}`;
-    applySelection(regionFromRing(closed), closed, name, !fromBox);
+    const versDash = retourDash.current;
+    applySelection(regionFromRing(closed), closed, name, !fromBox, !versDash); // from the dashboard: keep the study period
     setTool("none");
     polyPts.current = [];
     setPolyN(0);
+    if (versDash) { retourDash.current = false; setSplit(true); }
+  };
+  const drawFromDashboard = (t: "box" | "poly") => {
+    retourDash.current = true;
+    setSplit(false);
+    polyPts.current = [];
+    setPolyN(0);
+    setDraft(EMPTY_FC);
+    setTool(t);
   };
 
   const clearSelection = () => {
@@ -1590,7 +1618,10 @@ export default function Vigil() {
       if (tool === "poly") m.doubleClickZoom.disable(); else m.doubleClickZoom.enable();
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { polyPts.current = []; setPolyN(0); setDraft(EMPTY_FC); setTool("none"); }
+      if (e.key === "Escape") {
+        polyPts.current = []; setPolyN(0); setDraft(EMPTY_FC); setTool("none");
+        if (retourDash.current) { retourDash.current = false; setSplit(true); } // drawing started from the dashboard: back to it
+      }
       if (e.key === "Enter" && toolRef.current === "poly") finishPoly();
     };
     window.addEventListener("keydown", onKey);
@@ -1693,7 +1724,14 @@ export default function Vigil() {
   /* ── E7: focus month vs the median 2003–2025 (single month picked, else the last COMPLETE month) ── */
   const focus = (() => {
     if (!bornes) return { y: 2002, m: 0 };
-    if (selection && monthKey(selRange.from.y, selRange.from.m) === monthKey(selRange.to.y, selRange.to.m)) return selRange.from;
+    const a = monthKey(selRange.from.y, selRange.from.m), b = monthKey(selRange.to.y, selRange.to.m);
+    if (focusPick) { const k = monthKey(focusPick.y, focusPick.m); if (k >= a && k <= b) return focusPick; }
+    if (selection && a === b) return selRange.from;
+    // last COMPLETE month of the study period (a partial month is never the reference)
+    if (serie && index) for (let k = b; k >= a; k--) {
+      const c = serie.mois[indiceMois(index, Math.floor(k / 12), k % 12)];
+      if (c && !c.partiel) return { y: Math.floor(k / 12), m: k % 12 };
+    }
     const l = bornes.last;
     return partiel === texteMois(l.y, l.m) ? (l.m === 0 ? { y: l.y - 1, m: 11 } : { y: l.y, m: l.m - 1 }) : l;
   })();
@@ -1901,6 +1939,7 @@ export default function Vigil() {
       {!split && tool !== "none" && (
         <div className="hd-hintbar">
           {tool === "box" ? "Drag on the map" : polyN < 3 ? `Click to add vertices (${polyN})` : "Click first vertex, double-click, or Enter to close"}
+          {retourDash.current && <span>the dashboard reopens on the new zone</span>}
           <span>Esc to cancel</span>
         </div>
       )}
@@ -2101,11 +2140,36 @@ export default function Vigil() {
             </button>
           </div>
           <div className="hd-split-body">
+            {bornes && (
+              <aside className="hd-split-pane hd-dash-filters hd-glass" aria-label="Dashboard filters: zone and study period">
+                <div className="hd-dash-filters-h">
+                  <RegionName name={selectionName} onRename={setSelectionName} />
+                  <p>Zone and period filter the whole page. Normal: complete years 2003–2025.</p>
+                </div>
+                <RegionCard
+                  selection={selection}
+                  searchRef={dashSearchRef}
+                  onPick={selectPlace}
+                  onSearchEscape={() => {}}
+                  name={selectionName}
+                  range={selRange}
+                  onRangeChange={setSelRange}
+                  onApplyBbox={handleApplyBbox}
+                  bornes={bornes}
+                  onExport={exporter}
+                  onExportPoints={pointsDispo ? exporterPoints : null}
+                  ready={!!zone}
+                  onDraw={drawFromDashboard}
+                />
+              </aside>
+            )}
             {index && (
               <section className="hd-split-pane hd-dash-pane hd-glass" aria-label="Analyst dashboard">
-                <DeepDive index={index} serie={serie} metrique={metrique} focus={focus} title={selectionName} zoneNote={zoneNote}
-                  ring={selection.ring} bbox={selection.region.bbox}
-                  onPickMonth={(y, m) => setSelRange({ from: { y, m }, to: { y, m } })} />
+                {zoneErr ? <p className="hd-zone-note warn" role="alert">{zoneErr}</p> : (
+                  <DeepDive index={index} serie={serie} metrique={metrique} focus={focus} title={selectionName} zoneNote={zoneNote}
+                    ring={selection.ring} bbox={selection.region.bbox} period={selRange}
+                    onPickMonth={(y, m) => setFocusPick({ y, m })} />
+                )}
               </section>
             )}
           </div>
@@ -2283,6 +2347,14 @@ const CSS = PALETTE_CSS + `
 .hd-split-body{flex:1;min-height:0;display:flex;gap:8px;padding:0}
 .hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;border:1px solid rgba(255,255,255,.35);padding:12px 14px}
 .hd-split-pane .hd-sec-head{margin:0}
+.hd-dash-filters{flex:0 0 300px;overflow-y:auto;padding:10px 0 12px;gap:4px}
+.hd-dash-filters .hd-region-card{border-bottom:0;padding-top:2px}
+.hd-dash-filters-h{padding:0 14px 6px;border-bottom:1px solid var(--bd)}
+.hd-dash-filters-h p{margin:4px 0 0;font-size:10.5px;line-height:1.35;color:var(--mut)}
+.hd-rc-draw{display:flex;flex-direction:column;gap:5px;margin-top:4px}
+.hd-rc-draw-btns{display:flex;gap:6px}
+.hd-rc-draw-btns .hd-rc-apply{flex:1}
+@media (max-width: 900px){.hd-split-body{flex-direction:column}.hd-dash-filters{flex:0 0 auto;max-height:42vh}}
 .hd-split-cal{flex:1;min-height:0;display:flex}
 .hd-split-cal .hd-heat{flex:1}
 .hd-heat.lg{grid-template-columns:34px repeat(12,minmax(0,1fr));grid-auto-rows:1fr;grid-template-rows:auto;gap:2px}

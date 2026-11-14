@@ -480,6 +480,102 @@ export function intensityGrid(hot: Grid, frp: Grid): Grid {
   };
 }
 
+/* ── Study period (dashboard filter) ──────────────────────────────────── */
+
+/** Month key k = 12·y + m (m = 0..11). */
+export const mkey = (y: number, m: number) => y * 12 + m;
+export const ofKey = (k: number) => ({ y: Math.floor(k / 12), m: ((k % 12) + 12) % 12 });
+
+export interface PeriodSummary {
+  /** First and last month keys of the period (inclusive). */
+  k0: number; k1: number;
+  /** Months of the period: total, complete (summed), partial (left out), without data (left out). */
+  nMonths: number; nComplete: number; nPartial: number; nMissing: number;
+  /** Sum of the complete months of the period. */
+  total: number;
+  /**
+   * Climatological expectation of that same set of months: Σ over the complete months of the period of the MEAN of
+   * their calendar month over the baseline 2003–2025. The mean is additive (E[Σ] = Σ E), the median is not, so this
+   * is the right "normal" for a total of any length. null if a calendar month has fewer than 10 baseline years.
+   */
+  expected: number | null;
+  /** 100·total / expected. */
+  pctExpected: number | null;
+  /**
+   * Same-window comparison, only when the complete months span ≤ 12 consecutive months: the same calendar months,
+   * at the same offsets, summed PER baseline year, then median HF8 / PR / class of those sums (the period's own
+   * starting year left out; windows entirely inside 2003–2025). Exactly ytd() for a Jan..m period.
+   */
+  window: Comparison | null;
+}
+
+/**
+ * Summary of the study period [k0, k1] for one metric. Only complete months are summed (a partial month is never
+ * added to complete ones; months without data are not zeros). No band: monthly errors are correlated (same k).
+ */
+export function periodSummary(g: Grid, k0: number, k1: number): PeriodSummary {
+  const comp: { y: number; m: number; v: number }[] = [];
+  let nPartial = 0, nMissing = 0;
+  for (let k = k0; k <= k1; k++) {
+    const { y, m } = ofKey(k), c = cellAt(g, y, m);
+    if (!c) nMissing++;
+    else if (c.partial) nPartial++;
+    else comp.push({ y, m, v: c.v });
+  }
+  const total = comp.reduce((a, c) => a + c.v, 0);
+  let expected: number | null = comp.length ? 0 : null;
+  const meanOf = new Map<number, number | null>();
+  for (const c of comp) {
+    if (!meanOf.has(c.m)) { const b = monthBaseline(g, c.m); meanOf.set(c.m, b.length >= 10 ? b.reduce((a, x) => a + x, 0) / b.length : null); }
+    const mu = meanOf.get(c.m)!;
+    expected = expected === null || mu === null ? null : expected + mu;
+  }
+  let window: Comparison | null = null;
+  if (comp.length) {
+    const first = mkey(comp[0].y, comp[0].m), last = mkey(comp[comp.length - 1].y, comp[comp.length - 1].m);
+    if (last - first <= 11) {
+      const y0 = comp[0].y, offs = comp.map((c) => ({ dy: c.y - y0, m: c.m }));
+      const dyMax = Math.max(...offs.map((o) => o.dy));
+      const base: number[] = [];
+      for (let a = BASE_Y0; a + dyMax <= BASE_Y1; a++) {
+        if (a === y0) continue;
+        let s = 0, ok = true;
+        for (const o of offs) { const v = completeValue(g, a + o.dy, o.m); if (v === null) { ok = false; break; } s += v; }
+        if (ok) base.push(s);
+      }
+      window = compare(total, base);
+    }
+  }
+  return {
+    k0, k1, nMonths: k1 - k0 + 1, nComplete: comp.length, nPartial, nMissing, total,
+    expected, pctExpected: expected !== null && expected > 0 ? (100 * total) / expected : null, window,
+  };
+}
+
+/** Calendar years entirely inside [k0, k1] whose 12 months are complete (for a trend over the period). */
+export function fullYearsIn(g: Grid, k0: number, k1: number): { years: number[]; totals: number[] } {
+  const years: number[] = [], totals: number[] = [];
+  for (const a of annualPoints(g)) if (a.complete && a.total !== null && mkey(a.y, 0) >= k0 && mkey(a.y, 11) <= k1) { years.push(a.y); totals.push(a.total); }
+  return { years, totals };
+}
+/** Theil–Sen + Mann–Kendall on the complete calendar years inside the period (≥ 10 years), in % of their median. */
+export function trendIn(g: Grid, k0: number, k1: number): Trend | null {
+  const { years, totals } = fullYearsIn(g, k0, k1);
+  if (years.length < 10) return null;
+  const sen = senSlope(years, totals), mk = mannKendall(totals);
+  if (!sen || !mk) return null;
+  const med = quantileHF8(sortAsc(totals), 0.5);
+  const pc = (v: number) => (med > 0 ? (100 * v) / med : null);
+  return { years, totals, sen, mk, medianTotal: med, pct: pc(sen.slope), pctLo: pc(sen.lo), pctHi: pc(sen.hi) };
+}
+
+/** Mean of calendar month m over the complete months of the period (n = years used). */
+export function periodMonthMean(g: Grid, k0: number, k1: number, m: number): { mean: number; n: number } | null {
+  const v: number[] = [];
+  for (let k = k0; k <= k1; k++) { const d = ofKey(k); if (d.m === m) { const x = completeValue(g, d.y, m); if (x !== null) v.push(x); } }
+  return v.length ? { mean: v.reduce((a, b) => a + b, 0) / v.length, n: v.length } : null;
+}
+
 /* ── Anomaly classes of the calendar ───────────────────────────────────── */
 
 /** Edges (log2 of x/median) of the 9 diverging classes: centres −2, −1.5, …, +2 (¼× … 4×), clipped at ±2. */
