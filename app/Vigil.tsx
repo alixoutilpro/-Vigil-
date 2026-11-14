@@ -1724,7 +1724,7 @@ export default function Vigil() {
 
       {/* Deep dive: full-screen calendar */}
       {split && selection && (
-        <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
+        <div className="hd-split" role="dialog" aria-label="Analyst dashboard">
           <div className="hd-split-head hd-glass">
             <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
@@ -1732,13 +1732,11 @@ export default function Vigil() {
             </button>
           </div>
           <div className="hd-split-body">
-            <section className="hd-split-pane hd-glass" aria-label="Calendar">
-              <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span>{zoneNote && <span className="hd-zone-note inline">{zoneNote}</span>}</div>
-              <div className="hd-split-cal">{renderCalendar(true)}</div>
-            </section>
             {index && (
-              <section className="hd-split-pane hd-split-analytics hd-glass" aria-label="Analytics">
-                <DeepDive index={index} serie={serie} ring={selection.ring} bbox={selection.region.bbox} y0={Y0} y1={Y1} focus={focus} stat={focusStatHot} />
+              <section className="hd-split-pane hd-dash-pane hd-glass" aria-label="Analyst dashboard">
+                <DeepDive index={index} serie={serie} metrique={metrique} focus={focus} title={selectionName} zoneNote={zoneNote}
+                  ring={selection.ring} bbox={selection.region.bbox}
+                  onPickMonth={(y, m) => setSelRange({ from: { y, m }, to: { y, m } })} />
               </section>
             )}
           </div>
