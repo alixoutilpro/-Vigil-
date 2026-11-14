@@ -1536,7 +1536,7 @@ export default function Vigil() {
 
       {/* Left panel: Region card */}
       {(selection || searchOpen) && bornes && (
-        <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
+        <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left hd-glass" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
           <div className="hd-panel-head" {...leftDrag.handle}>
             <RegionName name={selection ? selectionName : newName} onRename={selection ? setSelectionName : setNewName} />
             <button className="hd-icon" onClick={() => setPanelLeftOpen(!panelLeftOpen)} aria-label={panelLeftOpen ? "Collapse region panel" : "Expand region panel"} aria-expanded={panelLeftOpen}>
@@ -1565,7 +1565,7 @@ export default function Vigil() {
 
       {/* Analytics panel */}
       {selection && (
-        <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
+        <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel hd-glass" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
           <div className="hd-panel-head" {...rightDrag.handle}>
             <div className="hd-head-actions">
               <button className="hd-icon" onClick={() => setSplit(true)} aria-label="Deep dive: calendar full screen" title="Deep dive">
@@ -1643,21 +1643,19 @@ export default function Vigil() {
       {/* Deep dive: full-screen calendar */}
       {split && selection && (
         <div className="hd-split" role="dialog" aria-label="Calendar deep dive">
-          <div className="hd-split-head">
-            <span className="hd-word-sm">Vigil</span>
-            <span className="hd-mono hd-name">{selectionName}</span>
+          <div className="hd-split-head hd-glass">
             <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
             <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
               <CollapseIcon />
             </button>
           </div>
           <div className="hd-split-body">
-            <section className="hd-split-pane" aria-label="Calendar">
+            <section className="hd-split-pane hd-glass" aria-label="Calendar">
               <div className="hd-sec-head"><span className="hd-sec-title">Calendar</span>{zoneNote && <span className="hd-zone-note inline">{zoneNote}</span>}</div>
               <div className="hd-split-cal">{renderCalendar(true)}</div>
             </section>
             {index && (
-              <section className="hd-split-pane hd-split-analytics" aria-label="Analytics">
+              <section className="hd-split-pane hd-split-analytics hd-glass" aria-label="Analytics">
                 <DeepDive index={index} serie={serie} ring={selection.ring} bbox={selection.region.bbox} y0={Y0} y1={Y1} focus={focus} stat={focusStatHot} />
               </section>
             )}
@@ -1709,7 +1707,7 @@ export default function Vigil() {
 /* ────────────────────────────────────────────────────────────────────────── */
 
 const CSS = `
-.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#0f172a;--mut:#64748b;--or:#ea580c;--cr:#dc2626;--gr:#16a34a;
+.hd-root{--bg:#ffffff;--bg2:#f8fafc;--bd:#e2e8f0;--tx:#000000;--mut:#000000;--or:#ea580c;--cr:#dc2626;--gr:#16a34a;
   position:fixed;inset:0;overflow:hidden;background:var(--bg2);color:var(--tx);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
   font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased;color-scheme:light}
 .hd-root *{box-sizing:border-box}
@@ -1724,7 +1722,7 @@ const CSS = `
 .hd-word{padding:7px 12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
 .hd-logo{display:block;height:32px;width:auto;padding:0 4px;background:#fff!important}
 .hd-group{display:flex;gap:2px;padding:3px}
-.hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#334155;white-space:nowrap}
+.hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#000000;white-space:nowrap}
 .hd-btn:hover{background:var(--bg2)}
 .hd-btn.on{background:var(--tx);color:#fff}
 .hd-btn.accent{background:var(--or);color:#fff}
@@ -1737,10 +1735,19 @@ const CSS = `
 .hd-hintbar{position:absolute;top:62px;left:50%;transform:translateX(-50%);z-index:5;background:var(--tx);color:#fff;border-radius:999px;padding:6px 14px;display:flex;gap:14px;font-size:12px}
 .hd-hintbar span{color:#94a3b8}
 
-.hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column;
-  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
-.hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden;
-  background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(14px) saturate(1.2);backdrop-filter:blur(14px) saturate(1.2);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-datechip{position:absolute;left:12px;bottom:28px;z-index:5;background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;padding:7px 10px;box-shadow:0 2px 12px rgba(15,23,42,.12);display:flex;flex-direction:column;gap:6px}
+.hd-date-row{display:flex;align-items:center;gap:8px}
+.hd-date-row button{border:0;background:rgba(15,23,42,.06);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
+.hd-date-row button:hover{background:var(--bg2)}
+.hd-date-row .hd-link{width:auto;border:0;background:none;color:var(--or);font-weight:600;font-size:12px;padding:0 2px;height:auto}
+.hd-nodata{margin-top:4px;color:#b45309;font-size:11px;max-width:340px}
+.hd-frp-legend{display:flex;gap:10px;color:var(--mut);font-size:11px;align-items:center}
+.hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
+.hd-frp-legend i{width:9px;height:9px;border-radius:50%}
+
+.hd-glass{background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(44px) saturate(1.4);backdrop-filter:blur(44px) saturate(1.4);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column}
+.hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden}
 .hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
 .hd-panel-left .hd-region-card{border-bottom:0}
 .hd-panel-head{cursor:grab;touch-action:none;user-select:none;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px 4px 14px}
@@ -1783,9 +1790,9 @@ const CSS = `
 
 .hd-chart-wrap{position:relative}
 .hd-chart{width:100%;height:auto;display:block}
-.hd-axis{font-size:9px;fill:#64748b;font-variant-numeric:tabular-nums}
+.hd-axis{font-size:9px;fill:#000000;font-variant-numeric:tabular-nums}
 .hd-annot{font-size:9px;fill:#b91c1c;font-weight:600}
-.hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#334155;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
+.hd-chart-legend{display:flex;gap:12px;align-items:center;font-size:10.5px;color:#000000;margin-top:2px;font-family:ui-monospace,Menlo,monospace}
 .hd-chart-legend span{display:inline-flex;align-items:center;gap:5px}
 .hd-hover-read{margin-left:auto;color:var(--tx)}
 
@@ -1793,12 +1800,12 @@ const CSS = `
 .hd-sec-head{display:flex;justify-content:space-between;align-items:center;margin:-2px 0 -6px}
 .hd-sec-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
 
-.hd-split{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;background:var(--bg2)}
-.hd-split-head{display:flex;align-items:center;gap:14px;padding:10px 16px;background:var(--bg);border-bottom:1px solid var(--bd)}
+.hd-split{position:absolute;inset:12px;z-index:20;display:flex;flex-direction:column;gap:8px;background:transparent}
+.hd-split-head{display:flex;align-items:center;gap:14px;padding:10px 16px;flex-shrink:0;align-self:flex-end;width:fit-content}
 .hd-word-sm{font-weight:800;letter-spacing:.06em;text-transform:uppercase;font-size:12px}
-.hd-split-head .hd-seg{margin-left:auto}
-.hd-split-body{flex:1;min-height:0;display:flex;padding:12px}
-.hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:12px 14px}
+.hd-split-head .hd-seg{margin-left:0}
+.hd-split-body{flex:1;min-height:0;display:flex;gap:8px;padding:0}
+.hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;border:1px solid rgba(255,255,255,.35);padding:12px 14px}
 .hd-split-pane .hd-sec-head{margin:0}
 .hd-split-cal{flex:1;min-height:0;display:flex}
 .hd-split-cal .hd-heat{flex:1}
