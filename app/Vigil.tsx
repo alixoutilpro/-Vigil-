@@ -25,6 +25,7 @@ import {
 import { cellArea, cellToChildren, cellToParent } from "h3-js";
 import { quantileHF8, rangValeur, serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 import DeepDive from "./DeepDive";
+import { dashboardCsv } from "./exportDashboard";
 import { PALETTE_CSS, initDaltonien, palette, setDaltonien, useDaltonien } from "./palette";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -688,6 +689,12 @@ interface RegionCardProps {
   onExportPoints: (() => Promise<{ csv: string; n: number } | null>) | null;
   /** False while the zone is loading. */
   ready: boolean;
+  /** Dashboard only: draw the zone on the map (box or polygon); the dashboard reopens on the new zone. */
+  onDraw?: (t: "box" | "poly") => void;
+  /** Dashboard only: CSV of the whole dashboard for the zone and period (null when not ready). */
+  onExportDashboard?: () => string | null;
+  /** "carte" = vertical card of the map panel (default); "bandeau" = one compact horizontal row (dashboard). */
+  variante?: "carte" | "bandeau";
 }
 
 /** Region name with its Rename button, shown once in the panel header. */
@@ -740,7 +747,7 @@ function RegionName({ name, onRename }: { name: string; onRename: (name: string)
   );
 }
 
-function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, onExportPoints, ready }: RegionCardProps) {
+function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, onExportPoints, ready, onDraw, onExportDashboard, variante = "carte" }: RegionCardProps) {
   const bboxSel = selection?.region.bbox ?? null;
   const wasPolygon = !!selection?.wasPolygon;
 
@@ -853,62 +860,129 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
     URL.revokeObjectURL(url);
   };
 
+  /* ── Building blocks, shared by both layouts (one logic, two arrangements) ── */
+  const searchInput = (
+    <div className="hd-search-field">
+      <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+        <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
+      </svg>
+      <input
+        ref={searchRef}
+        id={variante === "bandeau" ? "hd-search-place-dash" : "hd-search-place"}
+        className="hd-search-input"
+        placeholder={variante === "bandeau" ? "Country or region…" : "Search country or region…"}
+        aria-label="Search a country or region"
+        autoComplete="off"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") { if (query) setQuery(""); else onSearchEscape(); }
+          else if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(matches.length - 1, i + 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); }
+          else if (e.key === "Enter" && matches[active]) pick(matches[active]);
+        }}
+      />
+      {query && <button className="hd-search-clear" onClick={() => setQuery("")} aria-label="Clear">×</button>}
+    </div>
+  );
+  const searchResults = (
+    <>
+      {matches.length > 0 && (
+        <div className="hd-search-results" role="listbox">
+          {matches.map((l, i) => (
+            <button key={l.kind + l.name} role="option" aria-selected={i === active}
+              className={"hd-search-result" + (i === active ? " on" : "")}
+              onMouseEnter={() => setActive(i)} onClick={() => pick(l)}>
+              <span>{l.name}</span><span className="hd-search-kind">{l.kind}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {query.trim() && matches.length === 0 && <p className="hd-rc-note">No country or region matches “{query.trim()}”.</p>}
+    </>
+  );
+  const coords = (
+    <>
+      {wasPolygon && <p className="hd-rc-note">Editing coordinates converts the polygon to a rectangle</p>}
+      <CoordFields idPrefix={variante === "bandeau" ? "hd-bbox-dash" : "hd-bbox"} latMax={latMax} lonMax={lonMax} sizeKm={sizeKm}
+        setLatMax={setLatMax} setLonMax={setLonMax} setSizeKm={setSizeKm} err={bboxErr} onEnter={validateAndApplyBbox} />
+      <button className="hd-rc-apply" aria-label="Apply coordinate changes to map" disabled={hasErr} onClick={validateAndApplyBbox}>Apply</button>
+    </>
+  );
+  const sel = (which: "from" | "to", part: "m" | "y") => (
+    <select id={`hd-range-${which}-${part}${variante === "bandeau" ? "-dash" : ""}`} className="hd-rc-monthinput"
+      aria-label={`${which === "from" ? "From" : "To"} ${part === "m" ? "month" : "year"}`}
+      value={draft[which][part]} onChange={(e) => setBound(which, part, Number(e.target.value))}>
+      {part === "m" ? MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>) : YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+    </select>
+  );
+  const applyPeriod = <button className="hd-rc-apply" aria-label="Apply study period to map" disabled={!dirty} onClick={applyRange}>Apply</button>;
+  const detections = onExportPoints && (
+    <button className="hd-rc-apply hd-rc-export2" onClick={handleExportPoints} disabled={ptsBusy} aria-label="Export every satellite detection of the zone and period as CSV"
+      title="Every NASA FIRMS detection (raw, all satellites, not harmonized) in the zone and study period, with the reason when it is not counted">
+      {ptsBusy ? "Preparing…" : variante === "bandeau" ? "Detections (CSV)" : "Export detections (CSV)"}
+    </button>
+  );
+
+  /* ── Dashboard: one discreet horizontal row (zone · coordinates · draw · period · export) ── */
+  if (variante === "bandeau") {
+    const exportDash = () => {
+      setExportErr("");
+      const csv = onExportDashboard?.();
+      if (!csv) { setExportErr(ready ? "No data for this area and period." : "The zone is still loading."); return; }
+      telechargerCsv(csv, "_dashboard");
+    };
+    return (
+      <div className="hd-fbar" role="toolbar" aria-label="Dashboard filters: zone and study period">
+        <div className="hd-fb-grp hd-fb-search">
+          <span className="hd-fb-lbl">Zone</span>
+          <div className="hd-fb-searchbox">{searchInput}{searchResults}</div>
+        </div>
+        <details className="hd-fb-pop">
+          <summary title="Zone from its north-east corner and size">Coordinates</summary>
+          <div className="hd-fb-popbody">{coords}</div>
+        </details>
+        {onDraw && (
+          <div className="hd-fb-grp" aria-label="Draw the zone on the map">
+            <span className="hd-fb-lbl">Draw</span>
+            <button className="hd-fb-btn" onClick={() => onDraw("box")} title="Drag a rectangle on the map; the dashboard reopens on it">Box</button>
+            <button className="hd-fb-btn" onClick={() => onDraw("poly")} title="Click the vertices on the map, close on the first vertex, by double-click or Enter; the dashboard reopens on it">Polygon</button>
+          </div>
+        )}
+        <div className="hd-fb-grp hd-fb-period" aria-label="Study period">
+          <span className="hd-fb-lbl">Period</span>
+          {sel("from", "m")}{sel("from", "y")}<span className="hd-fb-arrow" aria-hidden="true">→</span>{sel("to", "m")}{sel("to", "y")}
+          {applyPeriod}
+          {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
+        </div>
+        <details className="hd-fb-pop hd-fb-export">
+          <summary>Export</summary>
+          <div className="hd-fb-popbody">
+            {onExportDashboard && <button className="hd-rc-apply" onClick={exportDash} title="Every table of the dashboard (summary, monthly series, climatology, annual), both metrics, for the zone and period">Dashboard (CSV)</button>}
+            <button className="hd-rc-apply" onClick={handleExport} title="Monthly series of the zone for the period, with bands and provenance">Monthly series (CSV)</button>
+            {detections}
+            <p className="hd-rc-hint">Dashboard and series: harmonized (MODIS-Aqua eq.). Detections: raw FIRMS points (Greece only).</p>
+            {exportErr && <p role="alert" className="hd-rc-fielderr">{exportErr}</p>}
+            {ptsMsg && <p role="status" className="hd-rc-hint">{ptsMsg}</p>}
+          </div>
+        </details>
+      </div>
+    );
+  }
+
   return (
     <div className="hd-region-card">
       {/* 2. Country / region search */}
       <div className="hd-rc-section">
         <label htmlFor="hd-search-place" className="hd-rc-seclabel">Country or region</label>
-        <div className="hd-search-field">
-          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-            <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
-          </svg>
-          <input
-            ref={searchRef}
-            id="hd-search-place"
-            className="hd-search-input"
-            placeholder="Search country or region…"
-            autoComplete="off"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") { if (query) setQuery(""); else onSearchEscape(); }
-              else if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(matches.length - 1, i + 1)); }
-              else if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); }
-              else if (e.key === "Enter" && matches[active]) pick(matches[active]);
-            }}
-          />
-          {query && <button className="hd-search-clear" onClick={() => setQuery("")} aria-label="Clear">×</button>}
-        </div>
-        {matches.length > 0 && (
-          <div className="hd-search-results" role="listbox">
-            {matches.map((l, i) => (
-              <button key={l.kind + l.name} role="option" aria-selected={i === active}
-                className={"hd-search-result" + (i === active ? " on" : "")}
-                onMouseEnter={() => setActive(i)} onClick={() => pick(l)}>
-                <span>{l.name}</span><span className="hd-search-kind">{l.kind}</span>
-              </button>
-            ))}
-          </div>
-        )}
-        {query.trim() && matches.length === 0 && <p className="hd-rc-note">No country or region matches “{query.trim()}”.</p>}
+        {searchInput}
+        {searchResults}
       </div>
 
       {/* 3. Coordinates */}
       <div className="hd-rc-section">
         <div className="hd-rc-seclabel">Coordinates</div>
-        {wasPolygon && (
-          <p className="hd-rc-note">Editing coordinates converts the polygon to a rectangle</p>
-        )}
-        <CoordFields idPrefix="hd-bbox" latMax={latMax} lonMax={lonMax} sizeKm={sizeKm}
-          setLatMax={setLatMax} setLonMax={setLonMax} setSizeKm={setSizeKm} err={bboxErr} onEnter={validateAndApplyBbox} />
-        <button
-          className="hd-rc-apply"
-          aria-label="Apply coordinate changes to map"
-          disabled={hasErr}
-          onClick={validateAndApplyBbox}
-        >
-          Apply
-        </button>
+        {coords}
       </div>
 
       {/* 4. Study period */}
@@ -917,34 +991,14 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
         <div className="hd-rc-rangerow">
           <div className="hd-rc-field">
             <label htmlFor="hd-range-from-m" className="hd-rc-fieldlabel">From</label>
-            <div className="hd-rc-datepair">
-              <select id="hd-range-from-m" className="hd-rc-monthinput" aria-label="From month"
-                value={draft.from.m} onChange={(e) => setBound("from", "m", Number(e.target.value))}>
-                {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
-              </select>
-              <select id="hd-range-from-y" className="hd-rc-monthinput" aria-label="From year"
-                value={draft.from.y} onChange={(e) => setBound("from", "y", Number(e.target.value))}>
-                {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </div>
+            <div className="hd-rc-datepair">{sel("from", "m")}{sel("from", "y")}</div>
           </div>
           <div className="hd-rc-field">
             <label htmlFor="hd-range-to-m" className="hd-rc-fieldlabel">To</label>
-            <div className="hd-rc-datepair">
-              <select id="hd-range-to-m" className="hd-rc-monthinput" aria-label="To month"
-                value={draft.to.m} onChange={(e) => setBound("to", "m", Number(e.target.value))}>
-                {MONTHS.map((n, i) => <option key={n} value={i}>{n}</option>)}
-              </select>
-              <select id="hd-range-to-y" className="hd-rc-monthinput" aria-label="To year"
-                value={draft.to.y} onChange={(e) => setBound("to", "y", Number(e.target.value))}>
-                {YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </div>
+            <div className="hd-rc-datepair">{sel("to", "m")}{sel("to", "y")}</div>
           </div>
         </div>
-        <button className="hd-rc-apply" aria-label="Apply study period to map" disabled={!dirty} onClick={applyRange}>
-          Apply
-        </button>
+        {applyPeriod}
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
       </div>
 
@@ -954,12 +1008,9 @@ function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range,
           Export CSV
         </button>
         {exportErr && <p role="alert" className="hd-rc-fielderr" style={{ marginTop: 6 }}>{exportErr}</p>}
-        {onExportPoints && (
+        {detections && (
           <>
-            <button className="hd-rc-apply hd-rc-export2" onClick={handleExportPoints} disabled={ptsBusy} aria-label="Export every satellite detection of the zone and period as CSV"
-              title="Every NASA FIRMS detection (raw, all satellites, not harmonized) in the zone and study period, with the reason when it is not counted">
-              {ptsBusy ? "Preparing…" : "Export detections (CSV)"}
-            </button>
+            {detections}
             <p className="hd-rc-hint">Monthly series above: harmonized. Detections: raw FIRMS points (Greece).</p>
             {ptsMsg && <p role="status" className="hd-rc-hint">{ptsMsg}</p>}
           </>
@@ -1087,6 +1138,11 @@ export default function Vigil() {
   /** Gall-Peters warp currently applied to the map (tiles + data), see appliquerGeo. */
   const gpActifRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
+  /** Focus month picked in the dashboard calendar (kept only while it lies inside the study period). */
+  const [focusPick, setFocusPick] = useState<{ y: number; m: number } | null>(null);
+  /** The zone is being drawn from the dashboard: reopen it on the new zone (or on Esc). */
+  const retourDash = useRef(false);
+  const dashSearchRef = useRef<HTMLInputElement>(null);
   const [mapBounds, setMapBounds] = useState<[number, number, number, number] | null>(null);
   /** Raw vs harmonized calendars (country mode, PAYS_BRUT only) and the tab shown. */
   const [brut, setBrut] = useState<CalendrierBrut | null>(null);
@@ -1192,6 +1248,8 @@ export default function Vigil() {
       .catch((e) => { if (vivant) { setHexPays(null); console.warn("Country hexagons unavailable:", e); } });
     return () => { vivant = false; };
   }, [selection]);
+
+  useEffect(() => { setFocusPick(null); }, [selection]);
 
   /* ── Raw vs harmonized calendars of the selected country, when exported (brut/<pays>.json) ── */
   useEffect(() => {
@@ -1392,10 +1450,20 @@ export default function Vigil() {
     const closed: Ring = [...ring, ring[0]];
     regionCounterRef.current += 1;
     const name = `Region ${regionCounterRef.current}`;
-    applySelection(regionFromRing(closed), closed, name, !fromBox);
+    const versDash = retourDash.current;
+    applySelection(regionFromRing(closed), closed, name, !fromBox, !versDash); // from the dashboard: keep the study period
     setTool("none");
     polyPts.current = [];
     setPolyN(0);
+    if (versDash) { retourDash.current = false; setSplit(true); }
+  };
+  const drawFromDashboard = (t: "box" | "poly") => {
+    retourDash.current = true;
+    setSplit(false);
+    polyPts.current = [];
+    setPolyN(0);
+    setDraft(EMPTY_FC);
+    setTool(t);
   };
 
   const clearSelection = () => {
@@ -1787,7 +1855,10 @@ export default function Vigil() {
       if (tool === "poly") m.doubleClickZoom.disable(); else m.doubleClickZoom.enable();
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { polyPts.current = []; setPolyN(0); setDraft(EMPTY_FC); setTool("none"); }
+      if (e.key === "Escape") {
+        polyPts.current = []; setPolyN(0); setDraft(EMPTY_FC); setTool("none");
+        if (retourDash.current) { retourDash.current = false; setSplit(true); } // drawing started from the dashboard: back to it
+      }
       if (e.key === "Enter" && toolRef.current === "poly") finishPoly();
     };
     window.addEventListener("keydown", onKey);
@@ -1890,7 +1961,14 @@ export default function Vigil() {
   /* ── E7: focus month vs the median 2003–2025 (single month picked, else the last COMPLETE month) ── */
   const focus = (() => {
     if (!bornes) return { y: 2002, m: 0 };
-    if (selection && monthKey(selRange.from.y, selRange.from.m) === monthKey(selRange.to.y, selRange.to.m)) return selRange.from;
+    const a = monthKey(selRange.from.y, selRange.from.m), b = monthKey(selRange.to.y, selRange.to.m);
+    if (focusPick) { const k = monthKey(focusPick.y, focusPick.m); if (k >= a && k <= b) return focusPick; }
+    if (selection && a === b) return selRange.from;
+    // last COMPLETE month of the study period (a partial month is never the reference)
+    if (serie && index) for (let k = b; k >= a; k--) {
+      const c = serie.mois[indiceMois(index, Math.floor(k / 12), k % 12)];
+      if (c && !c.partiel) return { y: Math.floor(k / 12), m: k % 12 };
+    }
     const l = bornes.last;
     return partiel === texteMois(l.y, l.m) ? (l.m === 0 ? { y: l.y - 1, m: 11 } : { y: l.y, m: l.m - 1 }) : l;
   })();
@@ -2001,6 +2079,13 @@ export default function Vigil() {
       : `${fmtInt(serie.hexagones.length)} H3 res-5 hexagons (centre inside) · band: ${serie.table === "hotspots_sous_pays" ? "sub-country table" : serie.table === "hotspots" ? "country table (not validated below country scale)" : "unavailable"}${petiteZone ? " · indicative band (zone smaller than the tested zones)" : ""}`;
   const fiabFaible = serie?.source === "pays" && serie.fiabilite === "faible";
   const exporter = () => (zone && index ? exportCsv(zone, index, selRange) : null);
+  const exporterDashboard = (): string | null => {
+    if (!index || !serie || !selection) return null;
+    return dashboardCsv({
+      index, serie, title: selectionName, zoneNote, focus, bbox: selection.region.bbox, ring: selection.ring,
+      k0: monthKey(selRange.from.y, selRange.from.m), k1: monthKey(selRange.to.y, selRange.to.m),
+    });
+  };
   /** E9: the points file covers Greece only; a drawn zone qualifies when its box meets Greece's box. */
   const GR = COUNTRIES.find((c) => c.name === PAYS_POINTS)!.bbox;
   const pointsDispo = !!selection && (selection.region.pays === PAYS_POINTS
@@ -2104,6 +2189,7 @@ export default function Vigil() {
       {!split && tool !== "none" && (
         <div className="hd-hintbar">
           {tool === "box" ? "Drag on the map" : polyN < 3 ? `Click to add vertices (${polyN})` : "Click first vertex, double-click, or Enter to close"}
+          {retourDash.current && <span>the dashboard reopens on the new zone</span>}
           <span>Esc to cancel</span>
         </div>
       )}
@@ -2297,18 +2383,41 @@ export default function Vigil() {
       {/* Deep dive: full-screen calendar */}
       {split && selection && (
         <div className="hd-split" role="dialog" aria-label="Analyst dashboard">
-          <div className="hd-split-head hd-glass">
-            <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
-            <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
-              <CollapseIcon />
-            </button>
+          <div className="hd-split-head hd-split-head-bar hd-glass">
+            {bornes && (
+              <RegionCard
+                variante="bandeau"
+                selection={selection}
+                searchRef={dashSearchRef}
+                onPick={selectPlace}
+                onSearchEscape={() => {}}
+                name={selectionName}
+                range={selRange}
+                onRangeChange={setSelRange}
+                onApplyBbox={handleApplyBbox}
+                bornes={bornes}
+                onExport={exporter}
+                onExportPoints={pointsDispo ? exporterPoints : null}
+                onExportDashboard={exporterDashboard}
+                ready={!!zone}
+                onDraw={drawFromDashboard}
+              />
+            )}
+            <div className="hd-split-head-end">
+              <Seg<Metrique> label="Metric" value={metrique} onChange={setMetrique} options={[{ v: "hotspots", t: "Hotspots" }, { v: "frp", t: "FRP (MW)" }]} />
+              <button className="hd-icon hd-split-close" onClick={() => setSplit(false)} aria-label="Exit deep dive (Esc)" title="Back (Esc)">
+                <CollapseIcon />
+              </button>
+            </div>
           </div>
           <div className="hd-split-body">
             {index && (
               <section className="hd-split-pane hd-dash-pane hd-glass" aria-label="Analyst dashboard">
-                <DeepDive index={index} serie={serie} metrique={metrique} focus={focus} title={selectionName} zoneNote={zoneNote}
-                  ring={selection.ring} bbox={selection.region.bbox}
-                  onPickMonth={(y, m) => setSelRange({ from: { y, m }, to: { y, m } })} />
+                {zoneErr ? <p className="hd-zone-note warn" role="alert">{zoneErr}</p> : (
+                  <DeepDive index={index} serie={serie} metrique={metrique} focus={focus} title={selectionName} zoneNote={zoneNote}
+                    ring={selection.ring} bbox={selection.region.bbox} period={selRange}
+                    onPickMonth={(y, m) => setFocusPick({ y, m })} />
+                )}
               </section>
             )}
           </div>
@@ -2488,6 +2597,33 @@ const CSS = PALETTE_CSS + `
 .hd-split-body{flex:1;min-height:0;display:flex;gap:8px;padding:0}
 .hd-split-pane{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:10px;border:1px solid rgba(255,255,255,.35);padding:12px 14px}
 .hd-split-pane .hd-sec-head{margin:0}
+.hd-rc-draw{display:flex;flex-direction:column;gap:5px;margin-top:4px}
+.hd-rc-draw-btns{display:flex;gap:6px}
+.hd-rc-draw-btns .hd-rc-apply{flex:1}
+.hd-split-head.hd-split-head-bar{position:relative;z-index:30;overflow:visible;align-self:stretch;width:auto;justify-content:space-between;align-items:center;gap:10px;padding:6px 10px 6px 12px;flex-wrap:wrap}
+.hd-split-head-end{display:flex;align-items:center;gap:10px;margin-left:auto}
+.hd-fbar{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;font-size:11.5px;min-width:0}
+.hd-fb-grp{display:flex;align-items:center;gap:5px}
+.hd-fb-lbl{font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.hd-fb-searchbox{position:relative;width:190px}
+.hd-fbar .hd-search-field{height:26px;padding:0 8px}
+.hd-fbar .hd-search-input{font-size:11.5px}
+.hd-fbar .hd-search-results{position:absolute;top:calc(100% + 4px);left:0;width:240px;z-index:40;background:#fff;border:1px solid var(--bd);border-radius:8px;box-shadow:0 10px 30px rgba(15,23,42,.18)}
+.hd-fb-searchbox .hd-rc-note{position:absolute;top:calc(100% + 4px);left:0;width:240px;z-index:40;background:#fff;padding:6px 8px;border-radius:8px;box-shadow:0 10px 30px rgba(15,23,42,.18);margin:0}
+.hd-fbar .hd-rc-monthinput{height:26px;padding:0 4px;font-size:11.5px}
+.hd-fbar .hd-rc-apply{height:26px;padding:0 10px;font-size:11.5px;margin:0;width:auto}
+.hd-fb-arrow{color:var(--mut);padding:0 1px}
+.hd-fb-btn{height:26px;border:1px solid var(--bd);background:rgba(255,255,255,.7);border-radius:7px;padding:0 9px;font-size:11.5px;font-weight:600}
+.hd-fb-btn:hover{background:#fff}
+.hd-fb-pop{position:relative}
+.hd-fb-pop>summary{list-style:none;cursor:pointer;height:26px;display:flex;align-items:center;gap:5px;padding:0 9px;border:1px solid var(--bd);border-radius:7px;background:rgba(255,255,255,.7);font-weight:600;white-space:nowrap}
+.hd-fb-pop>summary::-webkit-details-marker{display:none}
+.hd-fb-pop>summary::after{content:"▾";font-size:9px;color:var(--mut)}
+.hd-fb-pop[open]>summary{background:#fff}
+.hd-fb-popbody{position:absolute;top:calc(100% + 6px);left:0;z-index:40;width:290px;padding:10px;display:flex;flex-direction:column;gap:7px;background:#fff;border:1px solid var(--bd);border-radius:10px;box-shadow:0 12px 32px rgba(15,23,42,.2)}
+.hd-fb-export .hd-fb-popbody{left:auto;right:0}
+.hd-fb-popbody .hd-rc-apply{width:100%}
+@media (max-width: 900px){.hd-fb-searchbox{width:150px}}
 .hd-split-cal{flex:1;min-height:0;display:flex}
 .hd-split-cal .hd-heat{flex:1}
 .hd-heat.lg{grid-template-columns:34px repeat(12,minmax(0,1fr));grid-auto-rows:1fr;grid-template-rows:auto;gap:2px}

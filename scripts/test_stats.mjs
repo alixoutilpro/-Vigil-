@@ -110,6 +110,24 @@ eq("season peak = Aug", S.season(grid).peak, 7);
 eq("anomaly classes", [S.anomalyClass(0, 5), S.anomalyClass(5, 5), S.anomalyClass(20, 5), S.anomalyClass(1.25, 5), S.anomalyClass(3, 0) === null ? -1 : 9], [0, 4, 8, 0, -1]);
 eq("anomaly edge 2^0.25 is class 4", S.anomalyClass(5 * 2 ** 0.25, 5), 4);
 
+/* Study period (dashboard filter) on the same grid: v(y, m) = (y − 2000) + 100·[m = Aug] */
+const p26 = S.periodSummary(grid, S.mkey(2026, 0), S.mkey(2026, 10));   // Jan..Nov 2026, Nov partial
+eq("period counts", [p26.nMonths, p26.nComplete, p26.nPartial, p26.nMissing], [11, 10, 1, 0]);
+eq("period total = complete months only", p26.total, 360);
+eq("period expected = Σ monthly means 2003-2025", p26.expected, 10 * 14 + 100);
+eq("period % of expected", p26.pctExpected, 150);
+eq("period window == ytd (median, n, PR)", [p26.window.median, p26.window.base.length, p26.window.pr], [y26.median, y26.base.length, y26.pr]);
+const pw = S.periodSummary(grid, S.mkey(2024, 10), S.mkey(2025, 1));   // Nov 2024 .. Feb 2025, across the new year
+eq("window across years: total", pw.total, 24 + 24 + 25 + 25);
+eq("window across years: n (start 2003..2024, own start 2024 left out)", pw.window.base.length, 21);
+eq("window across years: median", pw.window.median, 4 * 13 + 2);
+eq("period with months before data", [S.periodSummary(grid, S.mkey(2002, 0), S.mkey(2002, 11)).nMissing, S.periodSummary(grid, S.mkey(2002, 0), S.mkey(2002, 11)).nComplete], [6, 6]);
+eq("period > 12 months: no window", S.periodSummary(grid, S.mkey(2010, 0), S.mkey(2012, 5)).window === null ? 1 : 0, 1);
+eq("trendIn whole baseline == trend", S.trendIn(grid, S.mkey(2003, 0), S.mkey(2025, 11)).sen.slope, tr.sen.slope);
+eq("trendIn 2015-2025 (11 yrs)", [S.trendIn(grid, S.mkey(2015, 0), S.mkey(2025, 11)).sen.slope, S.trendIn(grid, S.mkey(2015, 0), S.mkey(2025, 11)).years.length], [12, 11]);
+eq("trendIn < 10 full years -> null", S.trendIn(grid, S.mkey(2018, 3), S.mkey(2026, 10)) === null ? 1 : 0, 1);
+eq("period month mean Aug 2020-2022", [S.periodMonthMean(grid, S.mkey(2020, 0), S.mkey(2022, 11), 7).mean, S.periodMonthMean(grid, S.mkey(2020, 0), S.mkey(2022, 11), 7).n], [121, 3]);
+
 /* Real data: Greece (country series) */
 if (process.argv.includes("--greece")) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

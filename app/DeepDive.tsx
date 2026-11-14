@@ -15,9 +15,10 @@ import { gridDisk, latLngToCell, polygonToCells } from "h3-js";
 import {
   ResponsiveContainer, ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ReferenceArea,
 } from "recharts";
-import { cleMois, indiceMois, type IndexV2, type Ring } from "./donnees";
+import { indiceMois, texteMois, type IndexV2, type Ring } from "./donnees";
 import type { Metrique, MoisZone, SerieZone } from "./zone";
 import * as S from "./stats";
+import { gridsOf, type Grids } from "./exportDashboard";
 import { usePalette } from "./palette";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -102,27 +103,18 @@ export interface DeepDiveProps {
   zoneNote?: string;
   ring: Ring;
   bbox: [number, number, number, number];
+  /** Study period (inclusive months): filters every block of the page; the normal stays 2003–2025. */
+  period: { from: { y: number; m: number }; to: { y: number; m: number } };
 }
 
 type MonthRecord = { y: number; m: number; tmax: number; precip: number; rh: number; wind: number };
 
-export default function DeepDive({ index, serie, metrique, focus, onPickMonth, title, zoneNote, ring, bbox }: DeepDiveProps) {
-  const Y0 = cleMois(index.mois[0]).y, Y1 = cleMois(index.mois[index.mois.length - 1]).y;
+export default function DeepDive({ index, serie, metrique, focus, onPickMonth, title, zoneNote, ring, bbox, period }: DeepDiveProps) {
   const mz = (y: number, m: number): MoisZone | null => (serie ? serie.mois[indiceMois(index, y, m)] ?? null : null);
+  const k0 = S.mkey(period.from.y, period.from.m), k1 = S.mkey(period.to.y, period.to.m);
 
-  /* Monthly grids of both metrics (null = month not exported = no data, never 0) */
-  const grids = useMemo(() => {
-    const mk = (k: Metrique): S.Grid => ({
-      y0: Y0,
-      cells: Array.from({ length: Y1 - Y0 + 1 }, (_, i) => Array.from({ length: 12 }, (_, m) => {
-        const c = serie ? serie.mois[indiceMois(index, Y0 + i, m)] : null;
-        return c ? { v: c[k], partial: c.partiel, converted: c.converti } : null;
-      })),
-    });
-    if (!serie) return null;
-    const hot = mk("hotspots"), frp = mk("frp");
-    return { hot, frp, inten: S.intensityGrid(hot, frp) };
-  }, [serie, index, Y0, Y1]);
+  /* Monthly grids of both metrics (null = month not exported = no data, never 0), shared with the CSV export */
+  const grids = useMemo(() => (serie ? gridsOf(index, serie) : null), [serie, index]);
 
   if (!serie || !grids) return <div className="dd-empty">Loading the zone series…</div>;
   const g = metrique === "hotspots" ? grids.hot : grids.frp;
@@ -137,21 +129,21 @@ export default function DeepDive({ index, serie, metrique, focus, onPickMonth, t
       <style dangerouslySetInnerHTML={{ __html: DD_CSS }} />
       <header className="dd-head">
         <div>
-          <h2 className="dd-title">{title || "Selected zone"} <span className="dd-title-sub">· {nameOf(metrique)} per month, MODIS-Aqua equivalent</span></h2>
+          <h2 className="dd-title">{title || "Selected zone"} <span className="dd-title-sub">· {texteMois(period.from.y, period.from.m)} → {texteMois(period.to.y, period.to.m)} · {nameOf(metrique)} per month, MODIS-Aqua equivalent</span></h2>
           {zoneNote && <p className="dd-note">{zoneNote}{serie.fiabilite === "faible" ? " — little data, conversion less certain" : ""}</p>}
         </div>
       </header>
-      <Kpis g={g} grids={grids} metrique={metrique} focus={focus} mz={mz} bandOf={bandOf} />
+      <Kpis g={g} grids={grids} metrique={metrique} focus={focus} mz={mz} bandOf={bandOf} k0={k0} k1={k1} />
       <div className="dd-grid">
         <section className="dd-panel dd-cal-panel" aria-label="Anomaly calendar">
           <AnomalyCalendar g={g} metrique={metrique} focus={focus} mz={mz} bandOf={bandOf} smallZone={smallZone}
-            frpBandNote={metrique === "frp" && serie.source === "h3"} onPick={onPickMonth} />
+            frpBandNote={metrique === "frp" && serie.source === "h3"} onPick={onPickMonth} k0={k0} k1={k1} />
         </section>
         <div className="dd-side">
-          <section className="dd-panel" aria-label="Annual totals"><AnnualChart g={g} metrique={metrique} index={index} /></section>
+          <section className="dd-panel" aria-label="Annual totals"><AnnualChart g={g} metrique={metrique} index={index} k0={k0} k1={k1} /></section>
           <section className="dd-panel" aria-label="FRP and intensity"><FrpBlock grids={grids} focusY={focus.y} /></section>
         </div>
-        <section className="dd-panel dd-full" aria-label="Monthly climatology"><Climatology g={g} metrique={metrique} focus={focus} mz={mz} bandOf={bandOf} /></section>
+        <section className="dd-panel dd-full" aria-label="Monthly climatology"><Climatology g={g} metrique={metrique} focus={focus} mz={mz} bandOf={bandOf} k0={k0} k1={k1} /></section>
         <section className="dd-panel dd-full" aria-label="Weather context"><Weather index={index} ring={ring} bbox={bbox} focus={focus} /></section>
       </div>
       <p className="dd-foot">
@@ -166,7 +158,6 @@ export default function DeepDive({ index, serie, metrique, focus, onPickMonth, t
 
 /* ── KPI strip ─────────────────────────────────────────────────────────── */
 
-type Grids = { hot: S.Grid; frp: S.Grid; inten: S.Grid };
 interface CommonProps {
   g: S.Grid; metrique: Metrique; focus: { y: number; m: number };
   mz: (y: number, m: number) => MoisZone | null;
@@ -178,7 +169,7 @@ function ClassBadge({ cls }: { cls: string }) {
   return <span className="dd-badge" style={{ background: pal.classes[cls], color: cls.startsWith("much") ? "#fff" : "#0f172a" }}>{cls}</span>;
 }
 
-function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: Grids }) {
+function Kpis({ g, grids, metrique, focus, mz, bandOf, k0, k1 }: CommonProps & { grids: Grids; k0: number; k1: number }) {
   const u = unitOf(metrique);
   const fc = mz(focus.y, focus.m);
   const partial = !!fc?.partiel;
@@ -193,7 +184,9 @@ function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: 
   const ytd = S.ytd(g, anchor.y, anchor.m);
   const l12 = S.last12(g, anchor.y, anchor.m);
   const se = S.season(g);
-  const tr = S.trend(g);
+  const trP = S.trendIn(g, k0, k1), tr = trP ?? S.trend(g);
+  const ps = S.periodSummary(g, k0, k1);
+  const pTxt = `${texteMois(S.ofKey(k0).y, S.ofKey(k0).m)} → ${texteMois(S.ofKey(k1).y, S.ofKey(k1).m)}`;
   const iv = S.intensityAt(grids.hot, grids.frp, focus.y, focus.m);
   const ivCmp = S.monthComparison(grids.inten, focus.y, focus.m);
   const startL12 = (() => { const t = anchor.y * 12 + anchor.m - 11; return `${MONTHS[t % 12]} ${Math.floor(t / 12)}`; })();
@@ -202,6 +195,18 @@ function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: 
 
   return (
     <div className="dd-kpis">
+      <div className="dd-kpi dd-kpi-period">
+        <Def def={<>Sum of the complete months of the study period {pTxt} ({u}; partial months and months without data are left out, counts below). Normal = Σ over those same months of the mean of their calendar month {B0}–{B1} (the mean is additive, the median is not). For a period of ≤ 12 consecutive months, the same calendar window is also summed per baseline year: median, PR and class of those sums (the period&apos;s own starting year left out). No band: monthly errors are correlated.</>}>
+          <span className="dd-kpi-lbl">Selected period · {ps.nComplete} complete mo</span></Def>
+        <span className="dd-kpi-val">{ps.nComplete ? fmtF(ps.total) : "—"} <small>{u}</small></span>
+        <span className="dd-kpi-sub">
+          {ps.nComplete === 0 ? "no complete month in the period"
+            : ps.window ? `${fmtPct(ps.window.pctMedian)} of window median ${fmtF(ps.window.median)} · PR ${Math.round(ps.window.pr)} · ${ps.window.cls} · n=${ps.window.base.length}`
+            : ps.expected !== null ? `${fmtPct(ps.pctExpected)} of normal ${fmtF(ps.expected)} (Σ monthly means)` : "normal unavailable"}
+          {ps.nPartial + ps.nMissing > 0 ? ` · left out: ${ps.nPartial ? `${ps.nPartial} partial` : ""}${ps.nPartial && ps.nMissing ? ", " : ""}${ps.nMissing ? `${ps.nMissing} without data` : ""}` : ""}
+        </span>
+      </div>
+
       <div className="dd-kpi">
         <Def def={<>Value of the focus month for the zone, harmonized to MODIS-Aqua equivalent ({u}). Converted VIIRS months carry an 80 % conformal band (the true Aqua-equivalent value lies inside it 4 times out of 5). Click a calendar cell to change the focus month.</>}>
           <span className="dd-kpi-lbl">{nameOf(metrique)} · {MONTHS[focus.m]} {focus.y}</span></Def>
@@ -245,8 +250,8 @@ function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: 
       </div>
 
       <div className="dd-kpi">
-        <Def def={<>Theil–Sen slope of the annual totals {B0}–{B1} (median of all pairwise slopes), in % of the median annual total per year, with its 95 % CI (Sen 1968). Mann–Kendall two-sided p-value (ties corrected, no autocorrelation correction). Years from 2021 on are VIIRS converted to Aqua equivalent.</>}>
-          <span className="dd-kpi-lbl">Trend {B0}–{B1}</span></Def>
+        <Def def={<>Theil–Sen slope of the annual totals (median of all pairwise slopes), in % of the median annual total per year, with its 95 % CI (Sen 1968), on the complete calendar years inside the study period when there are at least 10, else on the baseline {B0}–{B1}. Mann–Kendall two-sided p-value (ties corrected, no autocorrelation correction). Years from 2021 on are VIIRS converted to Aqua equivalent.</>}>
+          <span className="dd-kpi-lbl">Trend {tr ? `${tr.years[0]}–${tr.years[tr.years.length - 1]}` : ""}{trP ? " (period)" : " (baseline)"}</span></Def>
         <span className="dd-kpi-val">{tr && tr.pct !== null ? `${fmtSigned(tr.pct)} %/yr` : "—"}</span>
         <span className="dd-kpi-sub">{tr ? `95 % CI ${tr.pctLo !== null ? fmtSigned(tr.pctLo) : "—"} to ${tr.pctHi !== null ? fmtSigned(tr.pctHi) : "—"} · MK p=${tr.mk.p < 0.001 ? "<0.001" : tr.mk.p.toFixed(3)} · n=${tr.mk.n}` : "fewer than 10 complete years"}</span>
       </div>
@@ -265,13 +270,15 @@ function Kpis({ g, grids, metrique, focus, mz, bandOf }: CommonProps & { grids: 
 
 type Tip = { kind: "cell" | "annual" | "median" | "medianAnnual"; y: number; m: number; pos: Pop };
 
-function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNote, onPick }: CommonProps & { smallZone: boolean; frpBandNote: boolean; onPick?: (y: number, m: number) => void }) {
+function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNote, onPick, k0, k1 }: CommonProps & { smallZone: boolean; frpBandNote: boolean; onPick?: (y: number, m: number) => void; k0: number; k1: number }) {
   const pal = usePalette(), DIV = pal.div, DIV_TEXT = pal.divText;
   const [tip, setTip] = useState<Tip | null>(null);
   const [kbd, setKbd] = useState<{ y: number; m: number }>(focus);
   useEffect(() => setKbd(focus), [focus.y, focus.m]); // eslint-disable-line react-hooks/exhaustive-deps
   const u = unitOf(metrique);
-  const years = Array.from({ length: g.cells.length }, (_, i) => g.y0 + i);
+  const ya = S.ofKey(k0).y, yb = S.ofKey(k1).y;
+  const years = Array.from({ length: yb - ya + 1 }, (_, i) => ya + i).filter((y) => y >= g.y0 && y < g.y0 + g.cells.length);
+  const inP = (y: number, m: number) => { const k = S.mkey(y, m); return k >= k0 && k <= k1; };
   const meds = useMemo(() => Array.from({ length: 12 }, (_, m) => {
     const b = S.monthBaseline(g, m);
     return { n: b.length, med: b.length >= 10 ? S.quantileHF8(S.sortAsc(b), 0.5) : NaN };
@@ -292,14 +299,14 @@ function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNot
       const ny = clamp(y + d[e.key][0], years[0], years[years.length - 1]), nm = clamp(m + d[e.key][1], 0, 11);
       setKbd({ y: ny, m: nm });
       (e.currentTarget.parentElement?.querySelector(`[data-ym="${ny}-${nm}"]`) as HTMLElement | null)?.focus();
-    } else if ((e.key === "Enter" || e.key === " ") && mz(y, m)) { e.preventDefault(); onPick?.(y, m); }
+    } else if ((e.key === "Enter" || e.key === " ") && mz(y, m) && inP(y, m)) { e.preventDefault(); onPick?.(y, m); }
   };
 
   return (
     <>
       <div className="dd-sec-head">
         <Def def={<>Each cell: the month&apos;s value ({u}, rounded for display). Colour: log₂(value ÷ median of the same month in the top row), clipped at ¼× and 4×, 9 classes. The top-row median uses all 23 complete years {B0}–{B1} (the cell&apos;s own year included); the percentile rank in the tooltip leaves the cell&apos;s year out, so the two can differ slightly. Colours use the unrounded values.</>}>
-          <span className="dd-sec-title">Anomaly calendar · {nameOf(metrique)} vs monthly median</span></Def>
+          <span className="dd-sec-title">Anomaly calendar · {nameOf(metrique)} vs monthly median · {ya === yb ? ya : `${ya}–${yb}`}</span></Def>
         <span className="dd-hint">click or Enter = focus month · arrows move</span>
       </div>
       <div className="dd-cal" role="grid" aria-label={`${nameOf(metrique)} per month and year, coloured by ratio to the monthly median`} onMouseLeave={() => setTip(null)}>
@@ -317,27 +324,29 @@ function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNot
         ))}
         <div className="dd-c dd-med dd-ann" role="gridcell" onMouseEnter={show("medianAnnual", 0, 0)} onMouseLeave={() => setTip(null)}>{isNaN(annMed) ? "—" : fmtC(annMed)}</div>
 
-        {years.map((y, yi) => {
-          const a = annual[yi];
+        {years.map((y) => {
+          const yi = y - g.y0, a = annual[yi];
           const rk = S.annualRank(g, y);
           return (
             <React.Fragment key={y}>
               <div className="dd-rh" role="rowheader">{y}</div>
               {g.cells[yi].map((c, m) => {
                 const isFocus = y === focus.y && m === focus.m;
+                const out = inP(y, m) ? "" : " dd-out";
+                const pick = inP(y, m) ? () => onPick?.(y, m) : undefined;
                 const common = {
                   "data-ym": `${y}-${m}`, role: "gridcell", tabIndex: y === kbd.y && m === kbd.m ? 0 : -1,
                   onMouseEnter: show("cell", y, m), onFocus: show("cell", y, m), onBlur: () => setTip(null),
                   onKeyDown: (e: React.KeyboardEvent) => move(e, y, m),
                 };
-                if (!c) return <div key={m} {...common} className="dd-c dd-nodata" aria-label={`${MONTHS[m]} ${y}: no data`} />;
+                if (!c) return <div key={m} {...common} className={"dd-c dd-nodata" + out} aria-label={`${MONTHS[m]} ${y}: no data`} />;
                 if (c.partial) return (
-                  <div key={m} {...common} className={"dd-c dd-partial" + (isFocus ? " dd-focus" : "")} onClick={() => onPick?.(y, m)}
+                  <div key={m} {...common} className={"dd-c dd-partial" + (isFocus ? " dd-focus" : "") + out} onClick={pick}
                     aria-label={`${MONTHS[m]} ${y}: ${fmtF(c.v)} ${u}, partial month, not compared`}>{fmtC(c.v)}</div>
                 );
                 return (
-                  <div key={m} {...common} className={"dd-c" + (isFocus ? " dd-focus" : "")} style={cellStyle(c.v, meds[m].med)} onClick={() => onPick?.(y, m)}
-                    aria-label={`${MONTHS[m]} ${y}: ${fmtF(c.v)} ${u}${meds[m].med > 0 ? `, ${(c.v / meds[m].med).toFixed(2)} times the median` : ""}`}>{fmtC(c.v)}</div>
+                  <div key={m} {...common} className={"dd-c" + (isFocus ? " dd-focus" : "") + out} style={cellStyle(c.v, meds[m].med)} onClick={pick}
+                    aria-label={`${MONTHS[m]} ${y}: ${fmtF(c.v)} ${u}${meds[m].med > 0 ? `, ${(c.v / meds[m].med).toFixed(2)} times the median` : ""}${out ? ", outside the study period" : ""}`}>{fmtC(c.v)}</div>
                 );
               })}
               {a.total === null ? <div className="dd-c dd-ann dd-nodata" role="gridcell" />
@@ -366,6 +375,7 @@ function AnomalyCalendar({ g, metrique, focus, mz, bandOf, smallZone, frpBandNot
         <span className="dd-leg-item"><b className="dd-sw dd-nodata" />no data (before MODIS Aqua, Jul 2002)</span>
         <span className="dd-leg-item"><b className="dd-sw dd-partial" />partial month / year, not compared</span>
         <span className="dd-leg-item"><b className="dd-sw" style={{ background: NEUTRAL }} />median = 0 (ratio n.d.)</span>
+        <span className="dd-leg-item"><b className="dd-sw dd-out-sw" />outside the study period (context, not pickable)</span>
       </div>
 
       {tip && <PopBox pos={tip.pos} wide><CalTip tip={tip} g={g} metrique={metrique} mz={mz} bandOf={bandOf} meds={meds} annMed={annMed} smallZone={smallZone} frpBandNote={frpBandNote} focus={focus} /></PopBox>}
@@ -445,20 +455,22 @@ function CalTip({ tip, g, metrique, mz, bandOf, meds, annMed, smallZone, frpBand
 
 const tipStyle: React.CSSProperties = { fontSize: 11, background: "#fff", border: "1px solid #e2e8f0", color: "#0f172a", borderRadius: 6, boxShadow: "0 8px 24px rgba(15,23,42,.25)", padding: "6px 9px" };
 
-function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; index: IndexV2 }) {
+function AnnualChart({ g, metrique, index, k0, k1 }: { g: S.Grid; metrique: Metrique; index: IndexV2; k0: number; k1: number }) {
   const pal = usePalette();
   const u = unitOf(metrique);
-  const pts = S.annualPoints(g);
+  const pa = S.ofKey(k0), pb = S.ofKey(k1);
+  const yLo = Math.max(g.y0, Math.min(pa.y, pb.y - 4)), yHi = pb.y;
+  const pts = S.annualPoints(g).filter((p) => p.y >= yLo && p.y <= yHi);
   const base = S.annualBaseline(g);
   const sb = S.sortAsc(base.totals);
   const ok = sb.length >= 10;
   const med = ok ? S.quantileHF8(sb, 0.5) : NaN, p10 = ok ? S.quantileHF8(sb, 0.1) : NaN, p90 = ok ? S.quantileHF8(sb, 0.9) : NaN;
-  const tr = S.trend(g);
+  const tr = S.trendIn(g, k0, k1) ?? S.trend(g);
   const data = pts.map((p) => ({
     y: p.y,
     full: p.complete ? p.total : null,
     part: !p.complete && p.total !== null ? p.total : null,
-    sen: tr && p.y >= B0 && p.y <= B1 ? tr.sen.intercept + tr.sen.slope * p.y : null,
+    sen: tr && p.y >= tr.years[0] && p.y <= tr.years[tr.years.length - 1] ? tr.sen.intercept + tr.sen.slope * p.y : null,
     span: p.complete ? "" : p.total !== null ? monthSpan(p.firstM, p.lastM) : "",
   }));
   const b = new Date(index.bascule_viirs + "T00:00:00Z");
@@ -467,16 +479,17 @@ function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; in
   return (
     <>
       <div className="dd-sec-head">
-        <Def def={<>Sum of the complete months of each year ({u}, Aqua equivalent). Solid = complete years; hollow = partial years, observed months only (NOT extrapolated). Shaded band = P10–P90 of the annual totals {B0}–{B1}, line = their median (HF8); dashed = Theil–Sen trend. Vertical line = switch to converted VIIRS.</>}>
-          <span className="dd-sec-title">Annual totals</span></Def>
+        <Def def={<>Sum of the complete months of each year ({u}, Aqua equivalent). Solid = complete years; hollow = partial years, observed months only (NOT extrapolated). Grey band = P10–P90 of the annual totals {B0}–{B1}, line = their median (HF8); dashed = Theil–Sen trend (complete years of the period if ≥ 10, else the baseline). Tinted area = the study period; years shown = the period (at least 5). Vertical line = switch to converted VIIRS.</>}>
+          <span className="dd-sec-title">Annual totals · {yLo}–{yHi}</span></Def>
       </div>
       <div className="dd-chart">
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 6, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid stroke="rgba(15,23,42,.12)" strokeDasharray="2 2" vertical={false} />
-            <XAxis dataKey="y" type="number" domain={[y0 - 0.5, y1 + 0.5]} ticks={pts.filter((p) => p.y % 4 === 2).map((p) => p.y)} tick={{ fontSize: 10, fill: "#000" }} tickLine={false} axisLine={false} />
+            <XAxis dataKey="y" type="number" domain={[y0 - 0.5, y1 + 0.5]} ticks={pts.filter((p) => (pts.length > 12 ? p.y % 4 === 2 : true)).map((p) => p.y)} tick={{ fontSize: 10, fill: "#000" }} tickLine={false} axisLine={false} />
             <YAxis tick={{ fontSize: 10, fill: "#000" }} tickLine={false} axisLine={false} width={42} tickFormatter={(v: number) => fmtC(v)} />
             {ok && <ReferenceArea y1={p10} y2={p90} fill="#94a3b8" fillOpacity={0.18} stroke="none" ifOverflow="extendDomain" />}
+            <ReferenceArea x1={Math.max(y0 - 0.5, pa.y - 0.5 + pa.m / 12)} x2={Math.min(y1 + 0.5, pb.y - 0.5 + (pb.m + 1) / 12)} fill={pal.accent} fillOpacity={0.07} stroke="none" ifOverflow="hidden" />
             {ok && <ReferenceLine y={med} stroke="#475569" strokeDasharray="4 3" label={{ value: `median ${fmtC(med)}`, position: "insideTopLeft", fontSize: 10, fill: "#334155" }} />}
             <ReferenceLine x={xSwitch} stroke={pal.alert} strokeDasharray="3 3" label={{ value: "VIIRS converted →", position: "insideTopRight", fontSize: 10, fill: pal.alert }} />
             <Line dataKey="sen" stroke="#64748b" strokeWidth={1} strokeDasharray="6 4" dot={false} isAnimationActive={false} connectNulls={false} />
@@ -503,6 +516,7 @@ function AnnualChart({ g, metrique, index }: { g: S.Grid; metrique: Metrique; in
         <span><i className="dd-l-hollow" />partial year (observed months only)</span>
         <span><i className="dd-l-band" />P10–P90 {B0}–{B1}</span>
         <span><i className="dd-l-dash" />Sen trend</span>
+        <span><i className="dd-l-period" />study period</span>
       </div>
     </>
   );
@@ -567,7 +581,7 @@ function FrpBlock({ grids, focusY }: { grids: Grids; focusY: number }) {
 
 /* ── Monthly climatology table ─────────────────────────────────────────── */
 
-function Climatology({ g, metrique, focus, mz, bandOf }: CommonProps) {
+function Climatology({ g, metrique, focus, mz, bandOf, k0, k1 }: CommonProps & { k0: number; k1: number }) {
   const u = unitOf(metrique);
   const se = S.season(g);
   const rows = MONTHS.map((name, m) => {
@@ -577,7 +591,8 @@ function Climatology({ g, metrique, focus, mz, bandOf }: CommonProps) {
     const base = S.sortAsc(S.monthBaseline(g, m, focus.y));
     const band = c && !c.partiel ? bandOf(c) : null;
     const br = band && base.length ? S.bandRank(base, band[0], band[1]) : null;
-    return { name, m, sm, v, partial: !!c?.partiel, pr: v !== null && base.length >= 10 ? S.percentileRank(base, v) : null, br };
+    const pm = S.periodMonthMean(g, k0, k1, m);
+    return { name, m, sm, v, partial: !!c?.partiel, pr: v !== null && base.length >= 10 ? S.percentileRank(base, v) : null, br, pm };
   });
   const ann = S.summarize(S.annualBaseline(g).totals);
   const ap = S.annualPoints(g).find((p) => p.y === focus.y);
@@ -618,6 +633,8 @@ function Climatology({ g, metrique, focus, mz, bandOf }: CommonProps) {
             <H t="CV" cls={sec} d={<>Coefficient of variation SD / mean (unitless).{heavy}</>} />
             <H t={String(focus.y)} cls="dd-focus-col" d={<>Value of {focus.y} for this month ({u}); hatched when partial.</>} />
             <H t="PR" cls="dd-focus-col" d={<>Percentile rank of the {focus.y} value, 100·(b + 0.5·e)/n against the baseline without {focus.y}; for converted months the PR of the 80 % band bounds in brackets.</>} />
+            <H t="Period mean (n)" cls="dd-period-col" d={<>Mean of this calendar month over the complete months of the study period, and the number of years used. Empty when the period does not contain this month.</>} />
+            <H t="÷ normal" cls="dd-period-col" d={<>Period mean ÷ baseline mean of the same month {B0}–{B1} (means on both sides, so the ratio is unbiased for totals).</>} />
           </tr></thead>
           <tbody>
             {rows.map((r) => (
@@ -626,6 +643,8 @@ function Climatology({ g, metrique, focus, mz, bandOf }: CommonProps) {
                 {cells(r.sm)}
                 <td className="dd-focus-col">{r.partial ? <span className="dd-partial-txt">partial</span> : fmtF(r.v)}</td>
                 <td className="dd-focus-col">{r.pr !== null ? Math.round(r.pr) : "—"}{r.br ? <small> ({Math.round(r.br.prLo)}–{Math.round(r.br.prHi)})</small> : null}</td>
+                <td className="dd-period-col">{r.pm ? <>{fmtF(r.pm.mean)} <small>({r.pm.n})</small></> : "—"}</td>
+                <td className="dd-period-col">{r.pm && r.sm && r.sm.mean > 0 ? `${(r.pm.mean / r.sm.mean).toFixed(2)}×` : "—"}</td>
               </tr>
             ))}
             <tr className="dd-row-annual">
@@ -633,6 +652,7 @@ function Climatology({ g, metrique, focus, mz, bandOf }: CommonProps) {
               {cells(ann)}
               <td className="dd-focus-col">{ap?.complete ? fmtF(ap.total) : <span className="dd-partial-txt">{ap?.total !== null && ap ? `partial (${monthSpan(ap.firstM, ap.lastM)})` : "—"}</span>}</td>
               <td className="dd-focus-col">{annPr !== null ? Math.round(annPr) : "—"}</td>
+              <td className="dd-period-col">—</td><td className="dd-period-col">—</td>
             </tr>
           </tbody>
         </table>
@@ -726,14 +746,24 @@ function Weather({ index, ring, bbox, focus }: { index: IndexV2; ring: Ring; bbo
 const DD_CSS = `
 .hd-dash-pane{overflow:auto;padding:12px 14px 16px}
 .dd-root{display:flex;flex-direction:column;gap:10px;min-width:0}
+.dd-head-act{display:flex;flex-direction:column;align-items:flex-end;gap:4px;max-width:340px}
+.dd-root .dd-export{border:1px solid rgba(15,23,42,.18);background:#0f172a;color:#fff;border-radius:8px;padding:6px 12px;font:600 12px Inter,ui-sans-serif,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+.dd-root .dd-export:hover{background:#1e293b}
+.dd-root .dd-export:focus-visible{outline:2px solid #ea580c;outline-offset:2px}
+.dd-kpi-period{box-shadow:inset 3px 0 0 #0f172a}
+.dd-c.dd-out{opacity:.28;cursor:default}
+.dd-c.dd-out.dd-focus{opacity:1}
+.dd-sw.dd-out-sw{background:#94a3b8;opacity:.35}
+.dd-period-col{background:rgba(15,23,42,.035)}
+.dd-l-period{display:inline-block;width:14px;height:9px;margin-right:5px;background:rgba(234,88,12,.18);vertical-align:-1px}
 .dd-empty{padding:24px;color:var(--mut);font-style:italic}
-.dd-head{display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
+.dd-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
 .dd-title{font-size:14px;font-weight:750;letter-spacing:.02em}
 .dd-title-sub{font-weight:450;font-size:12px;color:#334155}
 .dd-note{font-size:11px;color:#334155;line-height:1.4;margin:2px 0 0}
 .dd-foot{font-size:10.5px;color:#334155;font-style:italic;margin:0}
-.dd-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
-@media (min-width:1500px){.dd-kpis{grid-template-columns:repeat(8,minmax(0,1fr))}}
+.dd-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+@media (min-width:1900px){.dd-kpis{grid-template-columns:repeat(9,minmax(0,1fr))}}
 .dd-kpi{min-width:0;background:rgba(255,255,255,.62);border:1px solid rgba(15,23,42,.08);border-radius:8px;padding:7px 9px;display:flex;flex-direction:column;gap:2px}
 .dd-kpi-lbl{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#1e293b}
 .dd-kpi-val{font-size:17px;font-weight:750;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
