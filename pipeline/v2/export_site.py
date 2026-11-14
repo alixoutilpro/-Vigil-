@@ -3,6 +3,7 @@
 Run after `mondial agreger`, `mondial agreger --tables hex,jourfrp`, `mondial calibrer`, `mondial calibrer-frp`
 and `nettoyage --region grece`:
     python -m pipeline.v2.export_site                    # writes <sortie>/site/ (outside Git), prints sizes
+    python -m pipeline.v2.export_site --site public/data # writes into the repo, served by Vercel at /data/...
 
 Layout (all little-endian, gzip-compressed binary; decode in JS with DataView):
   h3_5/mois/YYYY-MM.bin.gz        map of one month. Records of 16 bytes, sorted by h3:
@@ -178,8 +179,9 @@ def exporter_points_grece(sortie, site):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Vigil v2 - fichiers statiques du site")
     ap.add_argument("--sortie", default=P.DOSSIER_SORTIE)
+    ap.add_argument("--site", default=None, help="destination folder (e.g. public/data, served by Vercel as /data)")
     a = ap.parse_args(argv)
-    dossier, site = os.path.join(a.sortie, "monde"), os.path.join(a.sortie, "site")
+    dossier, site = os.path.join(a.sortie, "monde"), a.site or os.path.join(a.sortie, "site")
     os.makedirs(site, exist_ok=True)
     M, par_pays, tailles, tuiles, seuils = exporter_h3(dossier, site)
     sc, t_pays = exporter_pays(dossier, site)

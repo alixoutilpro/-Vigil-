@@ -5,8 +5,10 @@
 > (le mois affiché, la zone choisie). Seul `index.json` et `incertitude.json` sont chargés au démarrage.
 > Le contrat v1 (`data/data.json`, Grèce) reste valable et inchangé.
 
-Emplacement : un dossier `data/` servi en statique. Le préfixe d'URL (`/data/…` sur Vercel, ou une autre URL
-d'hébergement) est noté `BASE` ci-dessous. **Décision d'hébergement en attente** (taille mesurée dans `index.json`).
+Emplacement (décision du 14/11) : **`public/data/` du dépôt `-Vigil-`, servi par Vercel** → `BASE = "/data"`
+(ex. `fetch("/data/index.json")`). Les fichiers `.bin.gz` sont servis tels quels (pas d'en-tête Content-Encoding) :
+la fonction `chargerBinaire` ci-dessous les décompresse. Ne pas régénérer ces fichiers souvent : chaque version
+s'ajoute à l'historique Git (~100-200 Mo).
 
 ## 1. Unités et provenance (à afficher)
 
@@ -133,5 +135,5 @@ python -m pipeline.v2.mondial agreger --tables hex,jourfrp
 python -m pipeline.v2.mondial calibrer
 python -m pipeline.v2.mondial calibrer-frp
 python -m pipeline.v2.nettoyage --region grece
-python -m pipeline.v2.export_site
+python -m pipeline.v2.export_site --site public/data
 ```
