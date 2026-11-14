@@ -203,6 +203,41 @@ const COUNTRIES: Array<{ name: string; bbox: [number, number, number, number] }>
   { name: "Zimbabwe", bbox: [-22.4, -15.6, 25.2, 33.1] },
 ];
 
+/** Continents and large fire regions (not FIRMS countries: always studied in hexagon mode). */
+const REGIONS: Array<{ name: string; bbox: [number, number, number, number] }> = [
+  { name: "Africa", bbox: [-35.0, 37.5, -18.0, 52.0] },
+  { name: "Europe", bbox: [35.0, 71.5, -25.0, 45.0] },
+  { name: "Asia", bbox: [-11.0, 77.0, 25.0, 180.0] },
+  { name: "North America", bbox: [7.0, 72.0, -168.0, -52.0] },
+  { name: "South America", bbox: [-56.0, 13.0, -82.0, -34.0] },
+  { name: "Oceania", bbox: [-48.0, 0.0, 110.0, 180.0] },
+  { name: "Mediterranean Basin", bbox: [30.0, 46.0, -10.0, 37.0] },
+  { name: "Sahel", bbox: [10.0, 20.0, -17.0, 40.0] },
+  { name: "Amazon", bbox: [-18.0, 5.0, -79.0, -44.0] },
+  { name: "Cerrado", bbox: [-24.0, -2.0, -60.0, -41.0] },
+  { name: "Gran Chaco", bbox: [-33.0, -17.0, -67.0, -57.0] },
+  { name: "Congo Basin", bbox: [-8.0, 6.0, 12.0, 31.0] },
+  { name: "Miombo (Southern Africa)", bbox: [-20.0, -5.0, 12.0, 40.0] },
+  { name: "Siberia", bbox: [50.0, 75.0, 60.0, 180.0] },
+  { name: "Boreal Canada", bbox: [49.0, 70.0, -141.0, -55.0] },
+  { name: "Alaska", bbox: [51.0, 71.5, -168.0, -130.0] },
+  { name: "California", bbox: [32.5, 42.0, -124.5, -114.1] },
+  { name: "Iberian Peninsula", bbox: [36.0, 43.8, -9.5, 3.3] },
+  { name: "Balkans", bbox: [39.5, 46.5, 13.5, 29.7] },
+  { name: "Indo-Gangetic Plain", bbox: [24.0, 32.5, 72.0, 88.5] },
+  { name: "Mainland Southeast Asia", bbox: [8.5, 28.5, 92.0, 109.5] },
+  { name: "Borneo", bbox: [-4.2, 7.1, 108.8, 119.3] },
+  { name: "Sumatra", bbox: [-6.0, 6.0, 95.0, 106.1] },
+  { name: "Northern Australia", bbox: [-23.0, -10.7, 113.3, 153.6] },
+  { name: "Patagonia", bbox: [-55.1, -37.5, -75.6, -62.0] },
+];
+
+type Lieu = { name: string; bbox: [number, number, number, number]; kind: "Country" | "Region" };
+const LIEUX: Lieu[] = [
+  ...COUNTRIES.map((c) => ({ ...c, kind: "Country" as const })),
+  ...REGIONS.map((r) => ({ ...r, kind: "Region" as const })),
+];
+
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Utilities                                                                  */
@@ -459,10 +494,62 @@ function Seg<T extends string>(props: { label: string; value: T; options: { v: T
 const bboxToSizeKm = (bbox: [number, number, number, number]) =>
   Math.round((bbox[1] - bbox[0]) * 111.32 * 10) / 10;
 
+type CoordErr = { latMax: string; lonMax: string; sizeKm: string };
+/** Square box whose north-east corner is (lat max, lon max), `size` km a side; errors per field when invalid. */
+function bboxFromCorner(latMax: string, lonMax: string, sizeKm: string): { err: CoordErr; bbox: [number, number, number, number] | null } {
+  const lat1 = parseFloat(latMax), lon1 = parseFloat(lonMax), sz = parseFloat(sizeKm);
+  const err: CoordErr = { latMax: "", lonMax: "", sizeKm: "" };
+  if (isNaN(lat1) || lat1 < -90 || lat1 > 90) err.latMax = "Must be −90 to 90";
+  if (isNaN(lon1) || lon1 < -180 || lon1 > 180) err.lonMax = "Must be −180 to 180";
+  if (isNaN(sz) || sz <= 0 || sz > 20000) err.sizeKm = "Must be 1–20 000";
+  if (err.latMax || err.lonMax || err.sizeKm) return { err, bbox: null };
+  const latSpan = sz / 111.32;
+  const lonSpan = sz / (111.32 * Math.cos(lat1 * Math.PI / 180));
+  return { err, bbox: [Math.max(-90, lat1 - latSpan), lat1, lon1 - lonSpan, lon1] };
+}
+
+/** Lon max / Lat max / Size (km) inputs, shared by the region card and the search panel. */
+function CoordFields({ idPrefix, latMax, lonMax, sizeKm, setLatMax, setLonMax, setSizeKm, err, onEnter }: {
+  idPrefix: string; latMax: string; lonMax: string; sizeKm: string;
+  setLatMax: (v: string) => void; setLonMax: (v: string) => void; setSizeKm: (v: string) => void;
+  err: CoordErr; onEnter: () => void;
+}) {
+  return (
+    <div className="hd-rc-grid3">
+      {([
+        { id: "lonMax", label: "Lon max", val: lonMax, onChange: setLonMax, err: err.lonMax, step: "0.01" },
+        { id: "latMax", label: "Lat max", val: latMax, onChange: setLatMax, err: err.latMax, step: "0.01" },
+        { id: "sizeKm", label: "Size (km)", val: sizeKm, onChange: setSizeKm, err: err.sizeKm, step: "1" },
+      ] as Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string; step: string }>).map(({ id, label, val, onChange, err, step }) => (
+        <div key={id} className="hd-rc-field">
+          <label htmlFor={`${idPrefix}-${id}`} className="hd-rc-fieldlabel">{label}</label>
+          <input
+            id={`${idPrefix}-${id}`}
+            type="number"
+            step={step}
+            className={"hd-rc-fieldinput" + (err ? " err" : "")}
+            value={val}
+            aria-describedby={err ? `${idPrefix}-${id}-err` : undefined}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onEnter()}
+          />
+          {err && <span id={`${idPrefix}-${id}-err`} role="alert" className="hd-rc-fielderr">{err}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 interface RegionCardProps {
-  selection: { region: RegionDef; ring: Ring; wasPolygon: boolean };
+  /** Null for a new region opened from the search button (nothing on the map yet). */
+  selection: { region: RegionDef; ring: Ring; wasPolygon: boolean } | null;
+  /** Focus target of the search button. */
+  searchRef: React.RefObject<HTMLInputElement>;
+  /** A country or region picked in the search field. */
+  onPick: (l: Lieu) => void;
+  /** Escape in an empty search field. */
+  onSearchEscape: () => void;
   name: string;
-  onRename: (name: string) => void;
   range: DateRange;
   onRangeChange: (r: DateRange) => void;
   onApplyBbox: (bbox: [number, number, number, number], name: string) => void;
@@ -474,9 +561,8 @@ interface RegionCardProps {
   ready: boolean;
 }
 
-function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBbox, bornes, onExport, ready }: RegionCardProps) {
-  const { region, wasPolygon } = selection;
-
+/** Region name with its Rename button, shown once in the panel header. */
+function RegionName({ name, onRename }: { name: string; onRename: (name: string) => void }) {
   /* ── Rename ── */
   const [renaming, setRenaming] = useState(false);
   const [nameInput, setNameInput] = useState(name);
@@ -492,33 +578,74 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
   };
   const cancelRename = () => { setNameInput(name); setRenaming(false); };
 
+  return (
+    <div className="hd-rc-titlerow">
+      {renaming ? (
+        <input
+          ref={nameInputRef}
+          id="hd-rc-nameinput"
+          className="hd-rc-nameinput hd-mono"
+          value={nameInput}
+          maxLength={40}
+          aria-label="Region name"
+          onChange={(e) => setNameInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") cancelRename(); }}
+          onBlur={commitRename}
+        />
+      ) : (
+        <span className="hd-mono hd-name">{name}</span>
+      )}
+      {!renaming && (
+        <button
+          className="hd-rc-rename"
+          aria-label="Rename region"
+          onClick={() => { setNameInput(name); setRenaming(true); }}
+        >
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M9.5 2.5l2 2-7 7H2.5v-2l7-7z" />
+          </svg>
+          Rename
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RegionCard({ selection, searchRef, onPick, onSearchEscape, name, range, onRangeChange, onApplyBbox, bornes, onExport, ready }: RegionCardProps) {
+  const bboxSel = selection?.region.bbox ?? null;
+  const wasPolygon = !!selection?.wasPolygon;
+
+  /* ── Country / region search ── */
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [] as Lieu[];
+    // Names starting with the query first, then the ones containing it.
+    const hits = LIEUX.filter((l) => l.name.toLowerCase().includes(q));
+    return hits.sort((x, y) => Number(!x.name.toLowerCase().startsWith(q)) - Number(!y.name.toLowerCase().startsWith(q))).slice(0, 8);
+  }, [query]);
+  useEffect(() => { setActive(0); }, [query]);
+  const pick = (l: Lieu) => { setQuery(""); onPick(l); };
+
   /* ── Bbox inputs (lon max, lat max, size in km) ── */
-  const [latMax, setLatMax] = useState(region.bbox[1].toFixed(2));
-  const [lonMax, setLonMax] = useState(region.bbox[3].toFixed(2));
-  const [sizeKm, setSizeKm] = useState(bboxToSizeKm(region.bbox).toFixed(1));
+  const [latMax, setLatMax] = useState(bboxSel ? bboxSel[1].toFixed(2) : "");
+  const [lonMax, setLonMax] = useState(bboxSel ? bboxSel[3].toFixed(2) : "");
+  const [sizeKm, setSizeKm] = useState(bboxSel ? bboxToSizeKm(bboxSel).toFixed(1) : "100.0");
   const [bboxErr, setBboxErr] = useState({ latMax: "", lonMax: "", sizeKm: "" });
 
   useEffect(() => {
-    setLatMax(region.bbox[1].toFixed(2));
-    setLonMax(region.bbox[3].toFixed(2));
-    setSizeKm(bboxToSizeKm(region.bbox).toFixed(1));
+    if (!bboxSel) return;
+    setLatMax(bboxSel[1].toFixed(2));
+    setLonMax(bboxSel[3].toFixed(2));
+    setSizeKm(bboxToSizeKm(bboxSel).toFixed(1));
     setBboxErr({ latMax: "", lonMax: "", sizeKm: "" });
-  }, [region.bbox]);
+  }, [bboxSel]);
 
   const validateAndApplyBbox = () => {
-    const lat1 = parseFloat(latMax), lon1 = parseFloat(lonMax), sz = parseFloat(sizeKm);
-    const e = { latMax: "", lonMax: "", sizeKm: "" };
-    if (isNaN(lat1) || lat1 < -90 || lat1 > 90) e.latMax = "Must be −90 to 90";
-    if (isNaN(lon1) || lon1 < -180 || lon1 > 180) e.lonMax = "Must be −180 to 180";
-    if (isNaN(sz) || sz <= 0 || sz > 20000) e.sizeKm = "Must be 1–20 000";
-    setBboxErr(e);
-    if (!e.latMax && !e.lonMax && !e.sizeKm) {
-      const latSpan = sz / 111.32;
-      const lonSpan = sz / (111.32 * Math.cos(lat1 * Math.PI / 180));
-      const lat0 = Math.max(-90, lat1 - latSpan);
-      const lon0 = lon1 - lonSpan;
-      onApplyBbox([lat0, lat1, lon0, lon1], name);
-    }
+    const { err, bbox } = bboxFromCorner(latMax, lonMax, sizeKm);
+    setBboxErr(err);
+    if (bbox) onApplyBbox(bbox, name);
   };
 
   const hasErr = Object.values(bboxErr).some(Boolean);
@@ -554,6 +681,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   const handleExport = () => {
     setExportErr("");
+    if (!selection) { setExportErr("Search a country or region, or enter coordinates first."); return; }
     const csv = onExport();
     if (!csv) {
       setExportErr(ready ? "No data for this area and period." : "The zone is still loading.");
@@ -573,65 +701,52 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   return (
     <div className="hd-region-card">
-      {/* 1. Title + Rename */}
-      <div className="hd-rc-titlerow">
-        {renaming ? (
+      {/* 2. Country / region search */}
+      <div className="hd-rc-section">
+        <label htmlFor="hd-search-place" className="hd-rc-seclabel">Country or region</label>
+        <div className="hd-search-field">
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+            <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
+          </svg>
           <input
-            ref={nameInputRef}
-            id="hd-rc-nameinput"
-            className="hd-rc-nameinput hd-mono"
-            value={nameInput}
-            maxLength={40}
-            aria-label="Region name"
-            onChange={(e) => setNameInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") cancelRename(); }}
-            onBlur={commitRename}
+            ref={searchRef}
+            id="hd-search-place"
+            className="hd-search-input"
+            placeholder="Search country or region…"
+            autoComplete="off"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") { if (query) setQuery(""); else onSearchEscape(); }
+              else if (e.key === "ArrowDown") { e.preventDefault(); setActive((i) => Math.min(matches.length - 1, i + 1)); }
+              else if (e.key === "ArrowUp") { e.preventDefault(); setActive((i) => Math.max(0, i - 1)); }
+              else if (e.key === "Enter" && matches[active]) pick(matches[active]);
+            }}
           />
-        ) : (
-          <span className="hd-mono hd-name">{name}</span>
+          {query && <button className="hd-search-clear" onClick={() => setQuery("")} aria-label="Clear">×</button>}
+        </div>
+        {matches.length > 0 && (
+          <div className="hd-search-results" role="listbox">
+            {matches.map((l, i) => (
+              <button key={l.kind + l.name} role="option" aria-selected={i === active}
+                className={"hd-search-result" + (i === active ? " on" : "")}
+                onMouseEnter={() => setActive(i)} onClick={() => pick(l)}>
+                <span>{l.name}</span><span className="hd-search-kind">{l.kind}</span>
+              </button>
+            ))}
+          </div>
         )}
-        {!renaming && (
-          <button
-            className="hd-rc-rename"
-            aria-label="Rename region"
-            onClick={() => { setNameInput(name); setRenaming(true); }}
-          >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M9.5 2.5l2 2-7 7H2.5v-2l7-7z" />
-            </svg>
-            Rename
-          </button>
-        )}
+        {query.trim() && matches.length === 0 && <p className="hd-rc-note">No country or region matches “{query.trim()}”.</p>}
       </div>
 
-      {/* 2. Coordinates */}
+      {/* 3. Coordinates */}
       <div className="hd-rc-section">
         <div className="hd-rc-seclabel">Coordinates</div>
         {wasPolygon && (
           <p className="hd-rc-note">Editing coordinates converts the polygon to a rectangle</p>
         )}
-        <div className="hd-rc-grid3">
-          {([
-            { id: "lonMax", label: "Lon max", val: lonMax, onChange: setLonMax, err: bboxErr.lonMax, step: "0.01" },
-            { id: "latMax", label: "Lat max", val: latMax, onChange: setLatMax, err: bboxErr.latMax, step: "0.01" },
-            { id: "sizeKm", label: "Size (km)", val: sizeKm, onChange: setSizeKm, err: bboxErr.sizeKm, step: "1" },
-          ] as Array<{ id: string; label: string; val: string; onChange: (v: string) => void; err: string; step: string }>).map(({ id, label, val, onChange, err, step }) => (
-            <div key={id} className="hd-rc-field">
-              <label htmlFor={`hd-bbox-${id}`} className="hd-rc-fieldlabel">{label}</label>
-              <input
-                id={`hd-bbox-${id}`}
-                type="number"
-                step={step}
-                className={"hd-rc-fieldinput" + (err ? " err" : "")}
-                value={val}
-                aria-describedby={err ? `hd-bbox-${id}-err` : undefined}
-                onChange={(e) => onChange(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && validateAndApplyBbox()}
-              />
-              {err && <span id={`hd-bbox-${id}-err`} role="alert" className="hd-rc-fielderr">{err}</span>}
-            </div>
-          ))}
-        </div>
+        <CoordFields idPrefix="hd-bbox" latMax={latMax} lonMax={lonMax} sizeKm={sizeKm}
+          setLatMax={setLatMax} setLonMax={setLonMax} setSizeKm={setSizeKm} err={bboxErr} onEnter={validateAndApplyBbox} />
         <button
           className="hd-rc-apply"
           aria-label="Apply coordinate changes to map"
@@ -642,7 +757,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         </button>
       </div>
 
-      {/* 3. Study period */}
+      {/* 4. Study period */}
       <div className="hd-rc-section">
         <div className="hd-rc-seclabel">Study period</div>
         <div className="hd-rc-rangerow">
@@ -679,7 +794,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
         {rangeErr && <span role="alert" className="hd-rc-fielderr">{rangeErr}</span>}
       </div>
 
-      {/* 4. Export CSV */}
+      {/* 5. Export CSV */}
       <div className="hd-rc-section">
         <button className="hd-rc-export" aria-label="Export hotspots as CSV" onClick={handleExport}>
           Export CSV
@@ -695,6 +810,7 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 /* ────────────────────────────────────────────────────────────────────────── */
 
 interface Selection { region: RegionDef; ring: Ring; wasPolygon: boolean }
+const NEW_REGION = "New region";
 type Tool = "none" | "box" | "poly";
 
 /** Hexagon mode refuses zones whose tiles would be too heavy to download (use country mode instead). */
@@ -778,13 +894,13 @@ export default function Vigil() {
   const [ready, setReady] = useState(false);
   const [tip, setTip] = useState<{ x: number; y: number; yi: number; m: number } | null>(null);
   const [hoverYear, setHoverYear] = useState<number | null>(null);
+  /** Region card opened from the search button while nothing is selected yet. */
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [newName, setNewName] = useState(NEW_REGION);
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
-  const searchRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const hexRef = useRef<HexCollection>({ type: "FeatureCollection", features: [] });
@@ -942,6 +1058,7 @@ export default function Vigil() {
     wasPolygon = false,
     resetRange = true,
   ) => {
+    setSearchOpen(false);
     setSelection({ region, ring, wasPolygon });
     setSelectionName(name ?? region.name);
     if (resetRange) setSelRange(fullRange());
@@ -953,6 +1070,9 @@ export default function Vigil() {
   }, [fitTo, setDraft, fullRange]);
 
   const handleApplyBbox = useCallback((bbox: [number, number, number, number], currentName: string) => {
+    setSearchOpen(false);
+    // A new region not renamed yet is named after its corner.
+    if (currentName === NEW_REGION) currentName = `${fmtLat(bbox[1])} ${fmtLon(bbox[3])}`;
     const ring = rectRing(bbox);
     const newRegion = { ...regionFromRing(ring), name: currentName, bbox };
     applySelection(newRegion, ring, currentName, false, false);
@@ -1330,35 +1450,23 @@ export default function Vigil() {
     </div>
   );
 
-  /* ── Country search ── */
-  const searchMatches = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return [] as typeof COUNTRIES;
-    return COUNTRIES.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 8);
-  }, [searchQuery]);
-
-  const selectCountry = useCallback(async (c: { name: string; bbox: [number, number, number, number] }) => {
+  /* ── Search (country or region) ── */
+  const selectPlace = useCallback(async (l: Lieu) => {
     setSearchOpen(false);
-    setSearchQuery("");
-    const pays = await chargerPays().catch(() => null);
-    const ring = rectRing(c.bbox);
-    applySelection({ ...regionFromRing(ring), name: c.name, pays: clePays(c.name, pays) }, ring, c.name, false);
+    const pays = l.kind === "Country" ? await chargerPays().catch(() => null) : null;
+    const ring = rectRing(l.bbox);
+    // Keep the study period shown in the card.
+    applySelection({ ...regionFromRing(ring), name: l.name, pays: l.kind === "Country" ? clePays(l.name, pays) : undefined }, ring, l.name, false, false);
   }, [applySelection]);
 
-  useEffect(() => {
-    if (searchOpen) { searchInputRef.current?.focus(); chargerPays().catch(() => null); } // warm pays.json
-  }, [searchOpen]);
+  const toggleSearch = () => {
+    if (selection) { setPanelLeftOpen(true); setTimeout(() => searchInputRef.current?.focus(), 0); return; }
+    if (!searchOpen) { setSelRange(fullRange()); setNewName(NEW_REGION); }
+    setSearchOpen(!searchOpen);
+  };
 
   useEffect(() => {
-    if (!searchOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
-        setSearchOpen(false);
-        setSearchQuery("");
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    if (searchOpen) { setPanelLeftOpen(true); setTimeout(() => searchInputRef.current?.focus(), 0); chargerPays().catch(() => null); } // warm pays.json
   }, [searchOpen]);
 
   /* ── Zone description (scale and band actually used) ── */
@@ -1398,44 +1506,15 @@ export default function Vigil() {
       <div className="hd-toolbar">
         <img className="hd-logo" src="/vigil-logo.png" alt="Vigil" />
 
-        {/* Country search */}
-        <div className="hd-search" ref={searchRef}>
-          {!searchOpen ? (
-            <button className="hd-search-toggle" onClick={() => setSearchOpen(true)} aria-label="Search country">
-              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-                <circle cx="6" cy="6" r="4.5" />
-                <line x1="9.5" y1="9.5" x2="13" y2="13" />
-              </svg>
-            </button>
-          ) : (
-            <>
-              <div className="hd-search-inner">
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-                  <circle cx="6" cy="6" r="4.5" /><line x1="9.5" y1="9.5" x2="13" y2="13" />
-                </svg>
-                <input
-                  ref={searchInputRef}
-                  className="hd-search-input"
-                  placeholder="Search country…"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Escape") { setSearchOpen(false); setSearchQuery(""); } }}
-                />
-                {searchQuery && (
-                  <button className="hd-search-clear" onClick={() => setSearchQuery("")} aria-label="Clear">×</button>
-                )}
-              </div>
-              {searchMatches.length > 0 && (
-                <div className="hd-search-dropdown">
-                  {searchMatches.map((c) => (
-                    <button key={c.name} className="hd-search-result" onClick={() => selectCountry(c)}>
-                      {c.name}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
+        {/* Search: opens the search card in the region card's slot */}
+        <div className="hd-search">
+          <button className={"hd-search-toggle" + (searchOpen ? " on" : "")} onClick={toggleSearch}
+            aria-label="Search a country, region or coordinates" aria-expanded={searchOpen} title="Search">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <circle cx="6" cy="6" r="4.5" />
+              <line x1="9.5" y1="9.5" x2="13" y2="13" />
+            </svg>
+          </button>
         </div>
 
         <div className="hd-group">
@@ -1456,10 +1535,10 @@ export default function Vigil() {
       )}
 
       {/* Left panel: Region card */}
-      {selection && bornes && (
+      {(selection || searchOpen) && bornes && (
         <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left hd-glass" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
           <div className="hd-panel-head" {...leftDrag.handle}>
-            <span className="hd-mono hd-name">{selectionName}</span>
+            <RegionName name={selection ? selectionName : newName} onRename={selection ? setSelectionName : setNewName} />
             <button className="hd-icon" onClick={() => setPanelLeftOpen(!panelLeftOpen)} aria-label={panelLeftOpen ? "Collapse region panel" : "Expand region panel"} aria-expanded={panelLeftOpen}>
               <svg width="12" height="12" viewBox="0 0 14 14"><path d={panelLeftOpen ? "M2 5l5 5 5-5" : "M2 9l5-5 5 5"} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square" /></svg>
             </button>
@@ -1468,8 +1547,10 @@ export default function Vigil() {
             <div className="hd-panel-body">
               <RegionCard
                 selection={selection}
-                name={selectionName}
-                onRename={setSelectionName}
+                searchRef={searchInputRef}
+                onPick={selectPlace}
+                onSearchEscape={() => { if (!selection) setSearchOpen(false); }}
+                name={selection ? selectionName : newName}
                 range={selRange}
                 onRangeChange={setSelRange}
                 onApplyBbox={handleApplyBbox}
@@ -1684,14 +1765,17 @@ const CSS = `
 .hd-search{position:relative;display:flex;flex-direction:column}
 .hd-search-toggle{border:0;background:transparent;width:30px;height:30px;display:grid;place-items:center;border-radius:6px;color:var(--tx);cursor:pointer}
 .hd-search-toggle:hover{background:rgba(15,23,42,.07)}
-.hd-search-inner{display:flex;align-items:center;gap:6px;padding:3px 6px 3px 10px}
-.hd-search-input{border:0;background:transparent;outline:none;font:inherit;font-size:12px;color:var(--tx);width:155px}
+.hd-search-toggle.on{background:rgba(15,23,42,.1)}
+.hd-search-field{display:flex;align-items:center;gap:6px;background:var(--bg2);border:1px solid var(--bd);border-radius:6px;padding:5px 6px 5px 9px;color:var(--mut)}
+.hd-search-field:focus-within{border-color:var(--or)}
+.hd-search-input{flex:1;min-width:0;border:0;background:transparent;outline:none;font:inherit;font-size:12px;color:var(--tx)}
 .hd-search-input::placeholder{color:var(--mut)}
 .hd-search-clear{border:0;background:transparent;padding:1px 5px;border-radius:5px;color:var(--mut);font-size:14px;line-height:1;cursor:pointer}
 .hd-search-clear:hover{color:var(--tx)}
-.hd-search-dropdown{position:absolute;top:calc(100% + 4px);left:0;min-width:100%;background:rgba(255,255,255,.96);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-radius:8px;box-shadow:0 6px 24px rgba(15,23,42,.16);overflow:hidden;z-index:20}
-.hd-search-result{display:block;width:100%;border:0;background:transparent;text-align:left;padding:7px 12px;font-size:12px;color:var(--tx);cursor:pointer;white-space:nowrap}
-.hd-search-result:hover{background:rgba(15,23,42,.06)}
+.hd-search-results{display:flex;flex-direction:column;border:1px solid var(--bd);border-radius:6px;overflow:hidden;background:var(--bg2)}
+.hd-search-result{display:flex;justify-content:space-between;gap:10px;width:100%;border:0;background:transparent;text-align:left;padding:6px 10px;font-size:12px;color:var(--tx);cursor:pointer}
+.hd-search-result.on{background:rgba(15,23,42,.07)}
+.hd-search-kind{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
 
 .hd-heat{display:grid;grid-template-columns:26px repeat(12,minmax(0,1fr));gap:1px;user-select:none}
 .hd-heat-col{font-size:9px;color:var(--mut);text-align:center;line-height:1.2}
@@ -1746,7 +1830,7 @@ const CSS = `
 
 /* ── Region Card ── */
 .hd-region-card{display:flex;flex-direction:column;gap:10px;padding:6px 14px 10px;border-bottom:1px solid var(--bd)}
-.hd-rc-titlerow{display:flex;align-items:center;gap:8px;min-height:26px}
+.hd-rc-titlerow{flex:1;min-width:0;display:flex;align-items:center;gap:8px;min-height:26px}
 .hd-rc-nameinput{flex:1;background:transparent;border:1px solid var(--or);border-radius:5px;padding:3px 7px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--tx);outline:none;min-width:0}
 .hd-rc-rename{margin-left:auto;border:0;background:transparent;display:flex;align-items:center;gap:4px;font-size:11px;color:var(--mut);padding:3px 7px;border-radius:5px;white-space:nowrap;flex-shrink:0}
 .hd-rc-rename:hover{background:rgba(15,23,42,.07);color:var(--tx)}
