@@ -313,13 +313,26 @@ interface HexFeature {
 }
 type HexCollection = { type: "FeatureCollection"; features: HexFeature[] };
 
+const ZOOM_RES4 = 1.2;
+const ZOOM_RES5 = 5.0;
 /** Display resolution by zoom: the mesh stays visible at every scale (res-5 children summed into their parent: exact). */
-const resPourZoom = (z: number) => (z < 1.2 ? 3 : z < 3.6 ? 4 : 5);
+const resPourZoom = (z: number) => (z < ZOOM_RES4 ? 3 : z < ZOOM_RES5 ? 4 : 5);
 const TAILLE_RES: Record<number, string> = { 3: "~110 km", 4: "~42 km", 5: "~17 km" };
 const AIRE = new Map<string, number>();
 const aireKm2 = (h: string) => { let a = AIRE.get(h); if (a === undefined) AIRE.set(h, (a = cellArea(h, "km2"))); return a; };
 
-function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique, res = 5): HexCollection {
+/** Check if [lon, lat] is inside [west, south, east, north] expanded by `margin` fraction on each side. */
+function inViewport(lon: number, lat: number, [w, s, e, n]: [number, number, number, number], margin: number): boolean {
+  const lngSpan = w <= e ? e - w : e + 360 - w;
+  const latSpan = n - s;
+  const dlng = lngSpan * margin, dlat = latSpan * margin;
+  if (lat < Math.max(s - dlat, -90) || lat > Math.min(n + dlat, 90)) return false;
+  const w2 = w - dlng, e2 = e + dlng;
+  if (w <= e) return lon >= w2 && lon <= e2;
+  return lon >= w2 || lon <= e2; // antimeridian wrap
+}
+
+function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: number, period: string, metrique: Metrique, res = 5, bounds?: [number, number, number, number]): HexCollection {
   let src = rows;
   if (res < 5) {
     src = new Map();
@@ -332,6 +345,7 @@ function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: numb
   for (const [h3, a] of src) {
     const v = metrique === "hotspots" ? a.n : a.frp;
     if (v <= 0) continue;
+    if (bounds && res >= 4) { const [lo, la] = centreHex(h3); if (!inViewport(lo, la, bounds, 0.2)) continue; }
     const contour = contourHex(h3);
     features.push({
       type: "Feature",
@@ -344,14 +358,14 @@ function hexFeatures(rows: Map<string, { n: number; frp: number }>, months: numb
 }
 
 /** One month of the world (no selection). */
-function hexDuMois(rows: HexMois[], period: string, metrique: Metrique, res = 5): HexCollection {
+function hexDuMois(rows: HexMois[], period: string, metrique: Metrique, res = 5, bounds?: [number, number, number, number]): HexCollection {
   const m = new Map<string, { n: number; frp: number }>();
   for (const r of rows) m.set(r.h3, { n: r.hotspots, frp: r.frp });
-  return hexFeatures(m, 1, period, metrique, res);
+  return hexFeatures(m, 1, period, metrique, res, bounds);
 }
 
 /** Hexagons of the zone summed over the study period (from the tiles already loaded for the calendar). */
-function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique, res = 5): HexCollection {
+function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique: Metrique, res = 5, bounds?: [number, number, number, number]): HexCollection {
   const i0 = indiceMois(index, range.from.y, range.from.m), i1 = indiceMois(index, range.to.y, range.to.m);
   const m = new Map<string, { n: number; frp: number }>();
   const dans = new Set(zone.serie.hexagones);
@@ -365,7 +379,7 @@ function hexDeZone(zone: ZoneChargee, index: IndexV2, range: DateRange, metrique
     }
   }
   const period = i0 === i1 ? ym(monthKey(range.from.y, range.from.m)) : `${ym(monthKey(range.from.y, range.from.m))} → ${ym(monthKey(range.to.y, range.to.m))}`;
-  return hexFeatures(m, i1 - i0 + 1, period, metrique, res);
+  return hexFeatures(m, i1 - i0 + 1, period, metrique, res, bounds);
 }
 
 const r2 = (v: number | null) => (v === null ? "" : String(Math.round(v * 100) / 100));
@@ -415,10 +429,97 @@ const SAT_STYLE: StyleSpecification = {
   },
   layers: [
     { id: "sat", type: "raster", source: "sat" },
-    { id: "roads", type: "raster", source: "roads", paint: { "raster-opacity": 0.85 } },
-    { id: "places", type: "raster", source: "places" },
+    { id: "roads", type: "raster", source: "roads", minzoom: 5, paint: { "raster-opacity": 0.85 } },
+    { id: "places", type: "raster", source: "places", minzoom: 5 },
   ],
 };
+
+/* ── Gall-Peters, emulated on MapLibre's Mercator ──
+ * MapLibre only knows Mercator and the globe. Gall-Peters (cylindrical equal-area, standard parallels 45°)
+ * keeps x linear in longitude like Mercator and only changes y, so it is drawn as a Mercator map of
+ * "warped" latitudes: x = λ, y_merc = 2·sin φ (Gall-Peters scaled by √2 to keep Mercator's x). Every
+ * coordinate pushed to the map goes through gpVersCarte, every coordinate read back through gpDeCarte,
+ * and the raster tiles are resampled row by row by the "gp://" protocol below. */
+type Projection2D = "gall" | "mercator";
+const RAD = Math.PI / 180;
+/** Real latitude -> latitude drawn on the Mercator map (the poles land at ±74.8°). */
+const gpVersCarte = (lat: number) => (2 * Math.atan(Math.exp(2 * Math.sin(lat * RAD))) - Math.PI / 2) / RAD;
+/** Latitude read on the Mercator map -> real latitude (beyond ±74.8° it is clamped to the poles). */
+const gpDeCarte = (lat: number) => Math.asin(clamp(Math.log(Math.tan(Math.PI / 4 + clamp(lat, -89.9, 89.9) * RAD / 2)) / 2, -1, 1)) / RAD;
+/** Same GeoJSON with every latitude warped (Point, LineString, Polygon and their Multi variants). */
+function gpGeoJSON(fc: unknown): unknown {
+  const f = fc as { features?: { geometry?: { type: string; coordinates: unknown } }[] };
+  if (!f?.features?.length) return fc;
+  const map = (c: unknown): unknown => typeof (c as number[])[0] === "number"
+    ? [(c as number[])[0], gpVersCarte((c as number[])[1]), ...(c as number[]).slice(2)]
+    : (c as unknown[]).map(map);
+  return { ...f, features: f.features.map((ft) => ft.geometry ? { ...ft, geometry: { ...ft.geometry, coordinates: map(ft.geometry.coordinates) } } : ft) };
+}
+const ESRI_TPL: Record<string, string> = {
+  sat: `${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`,
+  roads: `${ESRI}/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}`,
+  places: `${ESRI}/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}`,
+};
+/** Tile URLs of a raster source, real Mercator or resampled to Gall-Peters. */
+const tuilesPour = (id: string, gp: boolean) => [gp ? `gp://${id}/{z}/{x}/{y}` : ESRI_TPL[id]];
+/** Style for the first render, with the tiles of the projection the page opens on. */
+const styleInitial = (gp: boolean): StyleSpecification => ({
+  ...SAT_STYLE,
+  sources: Object.fromEntries(Object.entries(SAT_STYLE.sources).map(([id, s]) => [id, { ...s, tiles: tuilesPour(id, gp) }])) as StyleSpecification["sources"],
+});
+const T = 256;
+/** World pixel row (Mercator, zoom z) -> latitude, and back. */
+const rowVersLat = (y: number, z: number) => Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / (T * 2 ** z)))) / RAD;
+const latVersRow = (lat: number, z: number) => (1 - Math.log(Math.tan(Math.PI / 4 + lat * RAD / 2)) / Math.PI) / 2 * T * 2 ** z;
+const LAT_MAX = 85.0511;
+/** "gp://<source>/{z}/{x}/{y}": builds a Gall-Peters tile from the Esri Mercator tiles. The column (longitude)
+ * is unchanged, each output row is copied from the real-latitude row of a source tile. Zoom z+1 sources give
+ * full vertical detail at the equator (Gall-Peters stretches it ×2); near the poles, where it squeezes, the
+ * source zoom drops so a tile never needs more than a handful of source rows. */
+async function tuileGallPeters(url: string, signal: AbortSignal): Promise<ImageBitmap> {
+  const [, id, zs, xs, ys] = url.match(/^gp:\/\/(\w+)\/(\d+)\/(\d+)\/(\d+)/) ?? [];
+  const z = Number(zs), x = Number(xs), y = Number(ys);
+  const tpl = ESRI_TPL[id];
+  // real latitude of each output row (NaN beyond the poles or the Mercator source limit)
+  const lats = Array.from({ length: T }, (_, r) => {
+    const lm = rowVersLat(y * T + r + 0.5, z);
+    const l = Math.log(Math.tan(Math.PI / 4 + lm * RAD / 2)) / 2;
+    return Math.abs(l) > 1 ? NaN : Math.asin(l) / RAD;
+  }).map((l) => (Math.abs(l) > LAT_MAX ? NaN : l));
+  const ok = lats.filter((l) => !Number.isNaN(l));
+  const canvas = new OffscreenCanvas(T, T);
+  const ctx = canvas.getContext("2d")!;
+  if (ok.length) {
+    let zsrc = Math.min(z + 1, 19);
+    const span = (zz: number) => Math.floor(latVersRow(Math.min(...ok), zz) / T) - Math.floor(latVersRow(Math.max(...ok), zz) / T) + 1;
+    while (zsrc > 0 && span(zsrc) > 4) zsrc--;
+    const k = 2 ** (zsrc - z); // source columns per output tile (zsrc may drop below z: then a fraction)
+    const sx0 = x * k, nx = Math.max(1, Math.round(k));
+    const ty0 = Math.floor(latVersRow(Math.max(...ok), zsrc) / T), ty1 = Math.floor(latVersRow(Math.min(...ok), zsrc) / T);
+    const tuiles = new Map<string, ImageBitmap>();
+    await Promise.all(Array.from({ length: (ty1 - ty0 + 1) * nx }, async (_, i) => {
+      const tx = Math.floor(sx0) + (i % nx), ty = ty0 + Math.floor(i / nx);
+      const r = await fetch(tpl.replace("{z}", String(zsrc)).replace("{x}", String(tx)).replace("{y}", String(ty)), { signal });
+      if (r.ok) tuiles.set(`${tx}/${ty}`, await createImageBitmap(await r.blob()));
+    }));
+    lats.forEach((l, r) => {
+      if (Number.isNaN(l)) return;
+      const yr = latVersRow(l, zsrc), ty = Math.floor(yr / T), sy = Math.min(T - 1, Math.floor(yr - ty * T));
+      if (k >= 1) {
+        for (let c = 0; c < nx; c++) {
+          const b = tuiles.get(`${sx0 + c}/${ty}`);
+          if (b) ctx.drawImage(b, 0, sy, T, 1, (c * T) / nx, r, T / nx, 1);
+        }
+      } else { // the output tile is a sub-part of one source tile
+        const b = tuiles.get(`${Math.floor(sx0)}/${ty}`);
+        if (b) ctx.drawImage(b, (sx0 - Math.floor(sx0)) * T, sy, k * T, 1, 0, r, T, 1);
+      }
+    });
+    tuiles.forEach((b) => b.close());
+  }
+  return canvas.transferToImageBitmap(); // MapLibre takes an ImageBitmap from addProtocol as is
+}
+let gpProtocole = false;
 
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -989,14 +1090,20 @@ export default function Vigil() {
   /** Region card opened from the search button while nothing is selected yet. */
   const [searchOpen, setSearchOpen] = useState(false);
   const [newName, setNewName] = useState(NEW_REGION);
+  // The page opens on the 3D globe; the 2D map defaults to Gall-Peters (equal-area: densities compare fairly across latitudes).
   const [flat, setFlat] = useState(false);
   const flatRef = useRef(false);
+  const [proj2D, setProj2D] = useState<Projection2D>("gall");
+  const proj2DRef = useRef<Projection2D>("gall");
+  /** Gall-Peters warp currently applied to the map (tiles + data), see appliquerGeo. */
+  const gpActifRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
   /** Focus month picked in the dashboard calendar (kept only while it lies inside the study period). */
   const [focusPick, setFocusPick] = useState<{ y: number; m: number } | null>(null);
   /** The zone is being drawn from the dashboard: reopen it on the new zone (or on Esc). */
   const retourDash = useRef(false);
   const dashSearchRef = useRef<HTMLInputElement>(null);
+  const [mapBounds, setMapBounds] = useState<[number, number, number, number] | null>(null);
   /** Raw vs harmonized calendars (country mode, PAYS_BRUT only) and the tab shown. */
   const [brut, setBrut] = useState<CalendrierBrut | null>(null);
   const [vueCal, setVueCal] = useState<VueCal>("harmonise");
@@ -1025,6 +1132,12 @@ export default function Vigil() {
   metriqueRef.current = metrique;
   const indexRef = useRef<IndexV2 | null>(null);
   indexRef.current = index;
+  const mapMovingRef = useRef(false);
+  const sentHexRef = useRef<unknown>(null);
+  const sentPtsRef = useRef<unknown>(null);
+  const sentSelRef = useRef<unknown>(null);
+  const sentDraftRef = useRef<unknown>(null);
+  const draftRafRef = useRef<number>(0);
 
   /* ── Data: index.json + incertitude.json at start ── */
   const bornes: Bornes | null = useMemo(() => index && index.mois.length
@@ -1193,24 +1306,50 @@ export default function Vigil() {
 
   const hexes = useMemo((): HexCollection => {
     if (!index) return { type: "FeatureCollection", features: [] };
-    if (selection && zone && zone.serie.source === "h3") return hexDeZone(zone, index, deferredRange, metrique, resCarte);
-    if (!moisRows || !moisCarte) return { type: "FeatureCollection", features: [] };
-    const hp = selection?.region.pays && hexPays?.pays === selection.region.pays ? hexPays.h3 : null;
-    if (selection?.region.pays && !hp) return { type: "FeatureCollection", features: [] }; // country hexagons loading
-    const rows = !selection ? moisRows : hp ? moisRows.filter((r) => hp.has(r.h3)) : moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring));
-    return hexDuMois(rows, moisCarte, metrique, resCarte);
-  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte, hexPays]);
+    const t0 = performance.now();
+    const vb = resCarte >= 4 ? mapBounds ?? undefined : undefined;
+    let result: HexCollection;
+    if (selection && zone && zone.serie.source === "h3") {
+      result = hexDeZone(zone, index, deferredRange, metrique, resCarte, vb);
+    } else if (!moisRows || !moisCarte) {
+      result = { type: "FeatureCollection", features: [] };
+    } else {
+      const hp = selection?.region.pays && hexPays?.pays === selection.region.pays ? hexPays.h3 : null;
+      if (selection?.region.pays && !hp) return { type: "FeatureCollection", features: [] }; // country hexagons loading
+      const rows = !selection ? moisRows : hp ? moisRows.filter((r) => hp.has(r.h3)) : moisRows.filter((r) => dansZone(r.h3, selection.region.bbox, selection.ring));
+      result = hexDuMois(rows, moisCarte, metrique, resCarte, vb);
+    }
+    const dur = performance.now() - t0;
+    if (dur > 5) console.log(`[perf] hexFeatures ${dur.toFixed(1)} ms · ${result.features.length} hex · res${resCarte} · zoom${mapRef.current?.getZoom()?.toFixed(1)}`);
+    return result;
+  }, [index, selection, zone, deferredRange, metrique, moisRows, moisCarte, resCarte, hexPays, mapBounds]);
   const mapTotal = useMemo(() => hexes.features.reduce((a, f) => a + (metrique === "hotspots" ? f.properties.n : f.properties.frp), 0), [hexes, metrique]);
   const seuils = index?.seuils_couleur_quantiles?.[metrique === "hotspots" ? "hotspots" : "frp_MW"];
 
-  /* ── Map: push GeoJSON into sources ── */
+  /* ── Map: push GeoJSON into sources (skips sources whose data ref hasn't changed) ── */
   const pushSources = useCallback(() => {
     const m = mapRef.current;
     if (!m) return;
-    (m.getSource("hex") as GeoJSONSource | undefined)?.setData(hexRef.current as never);
-    (m.getSource("pts") as GeoJSONSource | undefined)?.setData(ptsRef.current as never);
-    (m.getSource("sel") as GeoJSONSource | undefined)?.setData(selFcRef.current as never);
-    (m.getSource("draft") as GeoJSONSource | undefined)?.setData(draftRef.current as never);
+    const g = (fc: unknown) => (gpActifRef.current ? gpGeoJSON(fc) : fc) as never;
+    if (hexRef.current !== sentHexRef.current) { sentHexRef.current = hexRef.current; (m.getSource("hex") as GeoJSONSource | undefined)?.setData(g(hexRef.current)); }
+    if (ptsRef.current !== sentPtsRef.current) { sentPtsRef.current = ptsRef.current; (m.getSource("pts") as GeoJSONSource | undefined)?.setData(g(ptsRef.current)); }
+    if (selFcRef.current !== sentSelRef.current) { sentSelRef.current = selFcRef.current; (m.getSource("sel") as GeoJSONSource | undefined)?.setData(g(selFcRef.current)); }
+    if (draftRef.current !== sentDraftRef.current) { sentDraftRef.current = draftRef.current; (m.getSource("draft") as GeoJSONSource | undefined)?.setData(g(draftRef.current)); }
+  }, []);
+
+  /* ── pushDraft: only "draft" source, rate-limited to once per animation frame ── */
+  const pushDraft = useCallback(() => {
+    if (draftRafRef.current) return;
+    draftRafRef.current = requestAnimationFrame(() => {
+      draftRafRef.current = 0;
+      const m = mapRef.current;
+      if (!m) return;
+      if (draftRef.current !== sentDraftRef.current) {
+        sentDraftRef.current = draftRef.current;
+        const g = (fc: unknown) => (gpActifRef.current ? gpGeoJSON(fc) : fc) as never;
+        (m.getSource("draft") as GeoJSONSource | undefined)?.setData(g(draftRef.current));
+      }
+    });
   }, []);
 
   const setDraft = useCallback((fc: unknown) => { draftRef.current = fc; pushSources(); }, [pushSources]);
@@ -1231,7 +1370,8 @@ export default function Vigil() {
     if (!m) return;
     if (!loadedRef.current) { pendingFit.current = b; return; }
     const wide = window.innerWidth > 900;
-    m.fitBounds([[b[2], b[0]], [b[3], b[1]]], {
+    const v = gpActifRef.current ? gpVersCarte : (l: number) => l;
+    m.fitBounds([[b[2], v(b[0])], [b[3], v(b[1])]], {
       padding: { top: 90, left: 60, bottom: wide ? 60 : 340, right: wide && panelOpenRef.current ? 520 : 60 },
       duration: 1400, maxZoom: 11,
     });
@@ -1311,12 +1451,17 @@ export default function Vigil() {
   useEffect(() => {
     let cancelled = false;
     let map: MLMap | null = null;
+    let moveendTimer: ReturnType<typeof setTimeout> | null = null;
+    let hoverRaf = 0;
     (async () => {
       const maplibregl = (await import("maplibre-gl")).default;
       if (cancelled || !containerRef.current) return;
+      if (!gpProtocole) { gpProtocole = true; maplibregl.addProtocol("gp", (p, ac) => tuileGallPeters(p.url, ac.signal).then((data) => ({ data }))); }
+      const gp0 = gpActifRef.current;
       map = new maplibregl.Map({
-        container: containerRef.current, style: SAT_STYLE, center: [12, 24], zoom: 2.4, maxPitch: 75,
-        attributionControl: { compact: true },
+        container: containerRef.current, style: styleInitial(gp0), center: [12, gp0 ? gpVersCarte(24) : 24], zoom: 2.4,
+        maxPitch: flatRef.current ? 0 : 75,
+        attributionControl: { compact: true }, fadeDuration: 0,
       });
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -1362,10 +1507,24 @@ export default function Vigil() {
         colorRef.current();
       };
       map.on("style.load", install);
+      map.on("movestart", () => { mapMovingRef.current = true; });
+      map.on("moveend", () => {
+        mapMovingRef.current = false;
+        if (moveendTimer) clearTimeout(moveendTimer);
+        moveendTimer = setTimeout(() => {
+          if (!map) return;
+          const b = map.getBounds();
+          setMapBounds([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+        }, 150);
+      });
       map.on("zoomend", () => { if (map) setResCarte(resPourZoom(map.getZoom())); });
       map.on("load", () => {
         install(); pushSources(); loadedRef.current = true; setReady(true);
-        if (map) setResCarte(resPourZoom(map.getZoom()));
+        if (map) {
+          setResCarte(resPourZoom(map.getZoom()));
+          const b = map.getBounds();
+          setMapBounds([b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]);
+        }
         if (pendingFit.current) { const b = pendingFit.current; pendingFit.current = null; setTimeout(() => fitRef.current(b), 50); }
       });
 
@@ -1411,7 +1570,13 @@ export default function Vigil() {
         );
         if (!survol.isOpen()) survol.addTo(map);
       };
-      map.on("mousemove", "hex", montrer);
+      const montrerThrottled = (e: MapLayerMouseEvent) => {
+        if (mapMovingRef.current) return;
+        if (hoverRaf) return;
+        const eCopy = e;
+        hoverRaf = requestAnimationFrame(() => { hoverRaf = 0; montrer(eCopy); });
+      };
+      map.on("mousemove", "hex", montrerThrottled);
       const montrerPoint = (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const q = e.features[0].properties as { date: string; heure: string; sat: string; dn: string; conf: string; frp: number | null; cat: string; compte: boolean; origine: string; lat: number; lon: number };
@@ -1443,18 +1608,21 @@ export default function Vigil() {
       map.on("mouseenter", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = "crosshair"; });
       map.on("mouseleave", "hex", () => { if (map && toolRef.current === "none") map.getCanvas().style.cursor = ""; survol.remove(); dernierH3 = ""; });
 
+      // Map position -> real [lon, lat] (the map draws warped latitudes in Gall-Peters)
+      const reel = (ll: { lng: number; lat: number }): [number, number] => [ll.lng, gpActifRef.current ? gpDeCarte(ll.lat) : ll.lat];
+
       // Polygon tool
       map.on("click", (e) => {
         if (toolRef.current !== "poly" || !map) return;
         const pts = polyPts.current;
         if (pts.length >= 3) {
-          const first = map.project(pts[0]);
+          const first = map.project([pts[0][0], gpActifRef.current ? gpVersCarte(pts[0][1]) : pts[0][1]]);
           if (Math.hypot(first.x - e.point.x, first.y - e.point.y) < 12) { finalizeRef.current(pts, false); return; }
         }
-        pts.push([e.lngLat.lng, e.lngLat.lat]);
+        pts.push(reel(e.lngLat));
         setPolyN(pts.length);
         draftRef.current = draftPoly(pts);
-        pushSources();
+        pushDraft();
       });
       map.on("dblclick", (e) => {
         if (toolRef.current !== "poly") return;
@@ -1464,8 +1632,8 @@ export default function Vigil() {
       });
       map.on("mousemove", (e) => {
         if (toolRef.current !== "poly" || !polyPts.current.length) return;
-        draftRef.current = draftPoly(polyPts.current, [e.lngLat.lng, e.lngLat.lat]);
-        pushSources();
+        draftRef.current = draftPoly(polyPts.current, reel(e.lngLat));
+        pushDraft();
       });
 
       // Box tool
@@ -1475,16 +1643,14 @@ export default function Vigil() {
       el.addEventListener("pointerdown", (ev) => {
         if (toolRef.current !== "box" || !map) return;
         const p = local(ev);
-        const ll = map.unproject([p.x, p.y]);
-        start = { x: p.x, y: p.y, ll: [ll.lng, ll.lat] };
+        start = { x: p.x, y: p.y, ll: reel(map.unproject([p.x, p.y])) };
         el.setPointerCapture(ev.pointerId);
       });
       el.addEventListener("pointermove", (ev) => {
         if (!start || !map) return;
         const p = local(ev);
-        const ll = map.unproject([p.x, p.y]);
-        draftRef.current = draftBox(start.ll, [ll.lng, ll.lat]);
-        pushSources();
+        draftRef.current = draftBox(start.ll, reel(map.unproject([p.x, p.y])));
+        pushDraft();
       });
       el.addEventListener("pointerup", (ev) => {
         if (!start || !map) return;
@@ -1492,12 +1658,19 @@ export default function Vigil() {
         const s = start;
         start = null;
         if (Math.hypot(p.x - s.x, p.y - s.y) < 8) { draftRef.current = EMPTY_FC; pushSources(); return; }
-        const ll = map.unproject([p.x, p.y]);
-        const b = rectRing([Math.min(s.ll[1], ll.lat), Math.max(s.ll[1], ll.lat), Math.min(s.ll[0], ll.lng), Math.max(s.ll[0], ll.lng)]);
+        const [lng, lat] = reel(map.unproject([p.x, p.y]));
+        const b = rectRing([Math.min(s.ll[1], lat), Math.max(s.ll[1], lat), Math.min(s.ll[0], lng), Math.max(s.ll[0], lng)]);
         finalizeRef.current(b.slice(0, 4), true);
       });
     })();
-    return () => { cancelled = true; map?.remove(); mapRef.current = null; };
+    return () => {
+      cancelled = true;
+      if (moveendTimer) clearTimeout(moveendTimer);
+      if (draftRafRef.current) cancelAnimationFrame(draftRafRef.current);
+      if (hoverRaf) cancelAnimationFrame(hoverRaf);
+      map?.remove();
+      mapRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1521,12 +1694,37 @@ export default function Vigil() {
   // two stops around the current zoom to put the morph at ratio t (0 = globe, 1 = plan) without moving the view.
   const prevFlatRef = useRef(false);
   const morphTRef = useRef(0); // current morph ratio (0 = globe, 1 = plan), so an interrupted morph resumes smoothly
+
+  // Switch the map between real Mercator and the Gall-Peters warp (2D + "gall" only; the globe is always real):
+  // raster tiles from the right URLs, data re-pushed, and the view kept on the same real place.
+  const appliquerGeo = useCallback(() => {
+    const m = mapRef.current;
+    const gp = flatRef.current && proj2DRef.current === "gall";
+    if (!m || gp === gpActifRef.current) return;
+    const c = m.getCenter();
+    const latReelle = gpActifRef.current ? gpDeCarte(c.lat) : c.lat;
+    gpActifRef.current = gp;
+    try {
+      for (const id of ["sat", "roads", "places"]) (m.getSource(id) as unknown as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.(tuilesPour(id, gp));
+    } catch { /* source not ready */ }
+    m.jumpTo({ center: [c.lng, gp ? gpVersCarte(latReelle) : latReelle] });
+    pushSources();
+  }, [pushSources]);
+
+  // Mercator / Gall-Peters button (2D)
+  useEffect(() => {
+    proj2DRef.current = proj2D;
+    if (ready) appliquerGeo();
+  }, [proj2D, ready, appliquerGeo]);
+
   useEffect(() => {
     flatRef.current = flat;
     const m = mapRef.current;
     if (!m || !ready) return;
     const from = prevFlatRef.current;
     prevFlatRef.current = flat;
+    // Back to the globe: drop the Gall-Peters warp before the plan wraps (the globe morph starts from real Mercator).
+    if (!flat) appliquerGeo();
 
     // Same curve as MapLibre's built-in "globe", but as an expression: style.setProjection() ignores
     // { type: "globe" } while a GlobeProjection is active (same name), so after a morph it would keep the
@@ -1556,7 +1754,7 @@ export default function Vigil() {
     };
     const settle = () => {
       try {
-        if (flat) m.setProjection({ type: "mercator" });
+        if (flat) { m.setProjection({ type: "mercator" }); appliquerGeo(); } // flat plan reached: Gall-Peters if chosen
         else setGlobeExpr(GLOBE_EXPR, "globe");
         morphTRef.current = flat ? 1 : 0;
         // A flat plan stays north-up and top-down; the globe keeps tilt and rotation.
@@ -1568,8 +1766,7 @@ export default function Vigil() {
     const refreshTiles = () => {
       try {
         for (const id of ["sat", "roads", "places"]) {
-          const src = SAT_STYLE.sources[id] as { tiles: string[] };
-          (m.getSource(id) as unknown as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.(src.tiles);
+          (m.getSource(id) as unknown as { setTiles?: (t: string[]) => void } | undefined)?.setTiles?.(tuilesPour(id, gpActifRef.current));
         }
         m.triggerRepaint();
       } catch { /* source not ready */ }
@@ -1607,7 +1804,7 @@ export default function Vigil() {
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [flat, ready]);
+  }, [flat, ready, appliquerGeo]);
 
   // Tool side effects
   useEffect(() => {
@@ -1898,7 +2095,7 @@ export default function Vigil() {
   }
 
   return (
-    <div className="hd-root">
+    <div className={"hd-root" + (flat && proj2D === "gall" ? " hd-gp" : "")}>
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <div ref={containerRef} className="hd-map" />
       {/* Decorative MODIS / VIIRS orbits over the globe until a region is picked */}
@@ -1932,6 +2129,12 @@ export default function Vigil() {
           {tool === "poly" && polyN >= 3 && <button className="hd-btn accent" onClick={finishPoly}>Finish</button>}
           {selection && <button className="hd-btn" onClick={clearSelection}>Clear</button>}
           <button className="hd-btn" onClick={() => setFlat(!flat)} aria-pressed={flat} title={flat ? "Switch to 3D globe" : "Switch to 2D map"}>{flat ? "3D" : "2D"}</button>
+          {flat && <span className="hd-proj" role="group" aria-label="2D map projection">
+            <button className={"hd-btn" + (proj2D === "gall" ? " on" : "")} onClick={() => setProj2D("gall")} aria-pressed={proj2D === "gall"}
+              title="Gall-Peters: equal-area projection, true relative sizes of countries">Gall-Peters</button>
+            <button className={"hd-btn" + (proj2D === "mercator" ? " on" : "")} onClick={() => setProj2D("mercator")} aria-pressed={proj2D === "mercator"}
+              title="Mercator: true shapes and angles, areas inflated toward the poles">Mercator</button>
+          </span>}
         </div>
         {index?.fixture && <span className="hd-fixture" title={`${BASE}/index.json is marked fixture: true`}>Demo data (fixture), not the real export</span>}
       </div>}
@@ -2265,6 +2468,8 @@ const CSS = PALETTE_CSS + `
 .hd-btn{border:0;background:transparent;border-radius:7px;padding:5px 10px;font-weight:550;color:#000000;white-space:nowrap}
 .hd-btn:hover{background:var(--bg2)}
 .hd-btn.on{background:var(--tx);color:#fff}
+.hd-proj{display:inline-flex;gap:2px;padding-left:4px;margin-left:2px;border-left:1px solid var(--bd)}
+.hd-gp .maplibregl-ctrl-scale{display:none} /* a scale bar is meaningless on the warped Gall-Peters map */
 .hd-btn.accent{background:var(--or);color:#fff}
 .hd-seg{display:inline-flex;background:var(--bg2);border:1px solid var(--bd);border-radius:9px;padding:2px;gap:2px}
 .hd-toolbar .hd-seg{border:0;padding:3px;border-radius:8px}
@@ -2285,7 +2490,7 @@ const CSS = PALETTE_CSS + `
 .hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
 .hd-frp-legend i{width:9px;height:9px;border-radius:50%}
 
-.hd-glass{background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(44px) saturate(1.4);backdrop-filter:blur(44px) saturate(1.4);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
+.hd-glass{background:rgba(255,255,255,.52);-webkit-backdrop-filter:blur(16px) saturate(1.4);backdrop-filter:blur(16px) saturate(1.4);border-radius:10px;box-shadow:0 6px 28px rgba(15,23,42,.16)}
 .hd-panel{position:absolute;right:12px;bottom:28px;z-index:6;width:min(372px,calc(100vw - 24px));max-height:calc(100vh - 80px);display:flex;flex-direction:column}
 .hd-panel-left{position:absolute;left:12px;top:70px;max-height:calc(100vh - 170px);z-index:6;width:min(372px,calc(100vw - 24px));display:flex;flex-direction:column;overflow:hidden}
 .hd-panel-left .hd-panel-body{overflow-y:auto;padding:0 0 4px;display:flex;flex-direction:column;gap:0}
