@@ -23,7 +23,7 @@ import {
   type CalendrierBrut, type HexMois, type IndexPays, type PointGrece, type IncertitudeV2, type IndexV2, type PaysV2, type Ring, type SerieBrute, type Tuile,
 } from "./donnees";
 import { cellArea, cellToChildren, cellToParent } from "h3-js";
-import { serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
+import { quantileHF8, rangValeur, serieH3, seriePays, statMois, type Metrique, type MoisZone, type SerieZone } from "./zone";
 import DeepDive from "./DeepDive";
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -462,25 +462,14 @@ function hexOpacityExpr(): unknown {
 
 interface AnnualPt {
   value: number | null;
+  /** Kept for the chart API: always false now (partial years are not extrapolated). */
   est: boolean;
 }
-/** Annual totals; incomplete years (2002, current year, partial month) are scaled up from the mean seasonal share. */
+/** Annual totals of COMPLETE years only. Incomplete years (2002, current year, partial month) are left out of the
+ *  line: extrapolating them from the mean seasonal share had no uncertainty (audit 14/11: Africa 2026 shown 385 k,
+ *  plausible 316–491 k). They are compared year-to-date instead (ytd below). */
 function annualSeries(vals: (number | null)[][]): AnnualPt[] {
-  const sums = vals.map((r) => r.reduce<number>((a, c) => a + (c ?? 0), 0));
-  const isFull = vals.map((r) => r.every((c) => c !== null));
-  return vals.map((row, yi) => {
-    if (isFull[yi]) return { value: sums[yi], est: false };
-    const obsMonths = row.map((c, m) => (c !== null ? m : -1)).filter((m) => m >= 0);
-    if (!obsMonths.length) return { value: null, est: true };
-    const ratios: number[] = [];
-    vals.forEach((r2, yj) => {
-      if (!isFull[yj] || sums[yj] <= 0) return;
-      ratios.push(obsMonths.reduce((a, m) => a + (r2[m] as number), 0) / sums[yj]);
-    });
-    const frac = ratios.length ? ratios.reduce((a, b) => a + b, 0) / ratios.length : 0;
-    if (frac < 0.2) return { value: null, est: true };
-    return { value: sums[yi] / frac, est: true };
-  });
+  return vals.map((r) => (r.every((c) => c !== null) ? { value: r.reduce<number>((a, c) => a + (c as number), 0), est: false } : { value: null, est: false }));
 }
 
 function heatColor(t: number): string {
@@ -1587,6 +1576,25 @@ export default function Vigil() {
     return d;
   };
   const line = annual.map((p) => p.value);
+  /** Year to date: complete months of the last year vs the median of the same months over 2003–2025 (HF8). */
+  const ytd = (() => {
+    const yi = vals.length - 1;
+    if (yi < 0 || !serie) return null;
+    const ms = vals[yi].map((v, m) => (v !== null && !cellOf(yi, m)?.partiel ? m : -1)).filter((m) => m >= 0);
+    if (!ms.length || ms.length === 12) return null;
+    const contigu = ms.every((m, i) => m === ms[0] + i);
+    const tot = ms.reduce((a, m) => a + (vals[yi][m] as number), 0);
+    const base: number[] = [];
+    for (let y = 2003; y <= 2025; y++) {
+      const r = vals[y - Y0];
+      if (!r || ms.some((m) => r[m] === null)) continue;
+      base.push(ms.reduce((a, m) => a + (r[m] as number), 0));
+    }
+    if (base.length < 10) return null;
+    base.sort((p, q) => p - q);
+    const med = quantileHF8(base, 0.5);
+    return { y: Y0 + yi, label: contigu ? `${MONTHS[ms[0]]}–${MONTHS[ms[ms.length - 1]]}` : `${ms.length} months`, tot, med, n: base.length };
+  })();
   const bascule = index ? new Date((vueEff === "naif_2012" && brut ? brut.bascule_naive : index.bascule_viirs) + "T00:00:00Z") : null;
   const xBascule = bascule ? xAt(bascule.getUTCFullYear() - Y0 + bascule.getUTCMonth() / 12) : null;
   const onChartMove = (e: React.MouseEvent<SVGRectElement>) => {
@@ -1884,7 +1892,15 @@ export default function Vigil() {
                     {fmtVal(focusCell[metrique])} {unit(metrique)} · median {fmtVal(focusStat.mediane)}{focusStat.pctMediane !== null ? ` · ${Math.round(focusStat.pctMediane)} % of median` : ""}
                   </div>
                   <div className="hd-median-row hd-mono dim">
-                    percentile {Math.round(focusStat.rang)} ({focusStat.n} yrs) · usual range (P10–P90) {fmtVal(focusStat.p10)}–{fmtVal(focusStat.p90)}
+                    percentile {(() => {
+                      const [lo, hi] = focusCell.converti ? band(focusCell) : [null, null];
+                      const r0 = lo !== null && serie && index ? rangValeur(serie, index, focus.y, focus.m, metrique, lo) : null;
+                      const r1 = hi !== null && serie && index ? rangValeur(serie, index, focus.y, focus.m, metrique, hi) : null;
+                      const v = Math.round(focusStat.rang);
+                      return r0 !== null && r1 !== null && (Math.round(r0) !== v || Math.round(r1) !== v)
+                        ? <span title="Percentile rank of the value, and of the bounds of its 80 % band (converted VIIRS month)">{v} (80 % band: {Math.round(r0)}–{Math.round(r1)})</span>
+                        : <>{v}</>;
+                    })()} ({focusStat.n} yrs) · usual range (P10–P90) {fmtVal(focusStat.p10)}–{fmtVal(focusStat.p90)}
                   </div>
                 </div>
               )}
@@ -1918,7 +1934,7 @@ export default function Vigil() {
                     </>
                   )}
                   <path d={pathOf(line)} fill="none" stroke="#ea580c" strokeWidth={2.2} strokeLinejoin="round" />
-                  {annual.map((p, i) => p.value !== null && p.est ? <circle key={i} cx={xAt(i)} cy={yAt(p.value)} r={2.6} fill="#fff" stroke="#ea580c" strokeWidth={1.2} /> : null)}
+
                   {hoverYear !== null && line[hoverYear] != null && (
                     <g>
                       <line x1={xAt(hoverYear)} x2={xAt(hoverYear)} y1={mt} y2={mt + ph} stroke="#0f172a" opacity={0.25} />
@@ -1929,7 +1945,12 @@ export default function Vigil() {
                 </svg>
                 <div className="hd-chart-legend">
                   <span><svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke="#ea580c" strokeWidth="2.4" /></svg>{vueEff === "harmonise" ? "Harmonized, MODIS-Aqua eq." : vueEff === "naif_2012" ? "Raw, naive splice 2012" : "Raw, switch Nov 2020 (not converted)"}</span>
-                  <span><svg width="8" height="8"><circle cx="4" cy="4" r="2.6" fill="#fff" stroke="#ea580c" strokeWidth="1.2" /></svg>estimated (partial year)</span>
+                  <span className="dim">complete years only</span>
+                  {ytd && (
+                    <span className="hd-mono hd-ytd" title="Year to date: the complete months of the current year, compared with the median (Hyndman–Fan type 8) of the same months over 2003–2025">
+                      {ytd.y} {ytd.label}: {fmtVal(ytd.tot)} · median {fmtVal(ytd.med)} ({ytd.med > 0 ? `${Math.round((100 * ytd.tot) / ytd.med)} %` : "n.d."}, n={ytd.n})
+                    </span>
+                  )}
                   {hoverYear !== null && (
                     <span className="hd-mono hd-hover-read">
                       {Y0 + hoverYear}: {line[hoverYear] != null ? fmtCompact(line[hoverYear]!) : "—"} {unit(metrique)}
@@ -2210,6 +2231,7 @@ const CSS = `
 .hd-mapkey-pts{max-width:300px;line-height:1.5}
 .hd-mapkey-pts i{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 4px;vertical-align:0;box-shadow:0 0 0 1px #0f172a}
 .hd-mapkey-pts i.hollow{background:transparent;box-shadow:0 0 0 1.2px #94a3b8}
+.hd-ytd{display:block;width:100%;font-size:10.5px;color:var(--tx);margin-top:2px}
 .hd-calview{display:flex;flex-direction:column;gap:5px;margin:2px 0 4px}
 .hd-calview-tabs{display:flex;gap:3px;padding:3px;border-radius:9px;background:rgba(15,23,42,.06)}
 .hd-calview-tabs button{flex:1;border:0;background:transparent;padding:5px 4px;border-radius:7px;font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;white-space:nowrap}

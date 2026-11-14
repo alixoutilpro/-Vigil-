@@ -185,3 +185,19 @@ export function statMois(serie: SerieZone, index: IndexV2, y: number, m: number,
     classe: CLASSES_NORMALE[classe],
   };
 }
+
+/**
+ * Percentile rank of any value x (e.g. a band bound) against the same leave-one-out base as statMois:
+ * month m of the complete years 2003–2025 without year y. PR = 100·(b + 0.5·e)/n. null when n < 10.
+ */
+export function rangValeur(serie: SerieZone, index: IndexV2, y: number, m: number, metrique: Metrique, x: number): number | null {
+  const base: number[] = [];
+  for (let a = 2003; a <= 2025; a++) {
+    if (a === y) continue;
+    const c = serie.mois[indiceMois(index, a, m)];
+    if (c && !c.partiel) base.push(c[metrique]);
+  }
+  if (base.length < 10) return null;
+  const b = base.filter((v) => v < x).length, e = base.filter((v) => v === x).length;
+  return (100 * (b + 0.5 * e)) / base.length;
+}
