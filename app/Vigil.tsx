@@ -2,9 +2,10 @@
 
 /**
  * Vigil - MODIS / VIIRS hotspot harmonization. Map-first single-file component.
- * Map: MapLibre GL (globe), Esri satellite imagery. All fire data is synthetic.
- * Region time series come from data/data.json (pillar 6 output contract) when it has cells
- * inside the region bbox; otherwise they fall back to the seeded generator.
+ * Map: MapLibre GL (globe / 2D plan), Esri satellite imagery.
+ * Single source of truth: data/data.json (pipeline v2 export, one row per 0.25 deg cell x month,
+ * hotspot COUNTS). The calendar, the map points and the CSV export are all built from it, so they
+ * always agree. Outside the area covered by data.json the app shows "no data", never invented fires.
  */
 
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
@@ -377,46 +378,6 @@ export function makeCustomRegion(lat: number, lon: number): RegionDef {
   };
 }
 
-/** Deterministic synthetic monthly archive, 2000-11 → 2026-10, with both sensors. */
-export function generateRegionData(r: RegionDef): (Cell | null)[][] {
-  const rng = mulberry32(hashStr(r.id));
-  const R_TRUE = R_NOM * (1 + (rng() - 0.5) * 0.12);
-  const yearFactor = Array.from({ length: NY }, () => Math.exp(gauss(rng) * 0.17));
-  const out: (Cell | null)[][] = [];
-  for (let yi = 0; yi < NY; yi++) {
-    const y = Y0 + yi;
-    const row: (Cell | null)[] = [];
-    const frac = yi / (NY - 1);
-    for (let m = 0; m < 12; m++) {
-      if ((y === Y0 && m < FIRST_MONTH_Y0) || (y === Y1 && m > LAST_MONTH_Y1)) {
-        row.push(null);
-        continue;
-      }
-      const t = m + 0.5;
-      const peak = r.peak - r.earlier * frac * 0.6;
-      const width = r.width + r.ext * frac * 0.6;
-      let d = Math.abs(t - peak);
-      d = Math.min(d, 12 - d);
-      const season = r.floor + Math.exp(-0.5 * (d / width) ** 2);
-      let mult = 1;
-      for (const a of r.anomalies) if (a.y === y && a.m.includes(m)) mult *= 1 + (a.k - 1) * 0.55;
-      const L = r.scale * season * (1 + r.trend * yi) * yearFactor[yi] * Math.exp(gauss(rng) * 0.12) * mult;
-
-      const terraOnly = y < 2002 || (y === 2002 && m < 6);
-      const mEff = terraOnly ? 0.6 : 1;
-      const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
-      const modis = L * mEff * Math.exp(gauss(rng) * 0.06);
-      const viirs = hasV ? L * R_TRUE * Math.exp(gauss(rng) * 0.06) : 0;
-      const mFrp = modis * r.frp * Math.exp(gauss(rng) * 0.05);
-      const vFrp = hasV ? L * r.frp * VFRP_BIAS * Math.exp(gauss(rng) * 0.05) : 0;
-      const wild = clamp(r.wild + 0.15 * Math.cos((2 * Math.PI * (t - r.peak)) / 12), 0.1, 0.95);
-      row.push({ y, m, modis: Math.round(modis), viirs: Math.round(viirs), mFrp: Math.round(mFrp), vFrp: Math.round(vFrp), mEff, hasV, wild });
-    }
-    out.push(row);
-  }
-  return out;
-}
-
 /* ── Pillar 6 contract → monthly cells ───────────────────────────────────── */
 
 const CONTRACT = contractData as unknown as ContractRow[];
@@ -430,39 +391,6 @@ function isoWeekMonth(isoYear: number, isoWeek: number): { y: number; m: number 
   return { y: thu.getUTCFullYear(), m: thu.getUTCMonth() };
 }
 
-/**
- * Weeks are attributed to the month of their Thursday, so a month holds 4 or 5 weeks of data.
- * Summing raw weeks would inflate every 5-Thursday month by ~25% and under-count a partial last month.
- * monthScale() converts "sum of the weeks present" into a per-calendar-month figure:
- * days in month / (7 x number of weeks actually covered by the data in that month).
- */
-let LAST_THURSDAY: number | null = null;
-function lastContractThursday(): number {
-  if (LAST_THURSDAY !== null) return LAST_THURSDAY;
-  let best = 0;
-  for (const r of CONTRACT) {
-    const t = Date.UTC(r.iso_year, 0, 4 + (r.iso_week - 1) * 7 + (4 - (new Date(Date.UTC(r.iso_year, 0, 4)).getUTCDay() || 7)));
-    if (t > best) best = t;
-  }
-  return (LAST_THURSDAY = best);
-}
-const MONTH_SCALE = new Map<number, number>();
-function monthScale(y: number, m: number): number {
-  const key = y * 12 + m;
-  const hit = MONTH_SCALE.get(key);
-  if (hit !== undefined) return hit;
-  const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
-  const last = lastContractThursday();
-  let covered = 0;
-  for (let d = 1; d <= dim; d++) {
-    const t = Date.UTC(y, m, d);
-    if (new Date(t).getUTCDay() === 4 && t <= last) covered++;
-  }
-  const f = covered > 0 ? dim / (7 * covered) : 1;
-  MONTH_SCALE.set(key, f);
-  return f;
-}
-
 let CONTRACT_END: { y: number; m: number } | null = null;
 function contractEnd() {
   if (CONTRACT_END) return CONTRACT_END;
@@ -474,46 +402,80 @@ function contractEnd() {
   return (CONTRACT_END = best);
 }
 
-/** Monthly cells for a region from data/data.json, or null when no contract cell lies in its bbox. */
-function contractRegionData(r: RegionDef, ring?: Ring): (Cell | null)[][] | null {
-  const [la0, la1, lo0, lo1] = r.bbox;
-  const rows = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
-  if (!rows.length) return null;
-  // Same cells as the map points: with a drawn polygon only the cells inside it are summed
-  // (coverage / first month still come from every cell in the bbox, so excluded months read 0, not "no data").
+/** Area and period covered by data/data.json (cells are CELL_DEG wide, lat/lon = cell centre). */
+interface Coverage { la0: number; la1: number; lo0: number; lo1: number; first: { y: number; m: number }; last: { y: number; m: number } }
+let COVERAGE: Coverage | null = null;
+function cellDeg(): number {
+  const lats = Array.from(new Set(CONTRACT.map((c) => c.lat))).sort((a, b) => a - b);
+  let gap = Infinity;
+  for (let i = 1; i < lats.length; i++) gap = Math.min(gap, lats[i] - lats[i - 1]);
+  return Number.isFinite(gap) && gap > 0 ? Math.round(gap * 1000) / 1000 : 0.25;
+}
+const CELL_DEG = cellDeg();
+function coverage(): Coverage | null {
+  if (COVERAGE || !CONTRACT.length) return COVERAGE;
+  const h = CELL_DEG / 2;
+  let la0 = 90, la1 = -90, lo0 = 180, lo1 = -180, first = { y: 9999, m: 0 };
+  for (const c of CONTRACT) {
+    la0 = Math.min(la0, c.lat - h); la1 = Math.max(la1, c.lat + h);
+    lo0 = Math.min(lo0, c.lon - h); lo1 = Math.max(lo1, c.lon + h);
+    const k = isoWeekMonth(c.iso_year, c.iso_week);
+    if (k.y < first.y || (k.y === first.y && k.m < first.m)) first = k;
+  }
+  return (COVERAGE = { la0, la1, lo0, lo1, first, last: contractEnd() });
+}
+/** True when the bbox [la0, la1, lo0, lo1] overlaps the area covered by data.json. */
+export function overlapsCoverage(b: [number, number, number, number]): boolean {
+  const cv = coverage();
+  return !!cv && b[0] < cv.la1 && b[1] > cv.la0 && b[2] < cv.lo1 && b[3] > cv.lo0;
+}
+/** True when the bbox lies entirely inside the area covered by data.json. */
+export function insideCoverage(b: [number, number, number, number]): boolean {
+  const cv = coverage();
+  return !!cv && b[0] >= cv.la0 && b[1] <= cv.la1 && b[2] >= cv.lo0 && b[3] <= cv.lo1;
+}
+
+/** Rows of data.json whose cell centre is inside the region (bbox, then drawn polygon if any). */
+function contractRows(bbox: [number, number, number, number] | null, ring?: Ring): ContractRow[] {
+  if (!bbox) return CONTRACT;
+  const [la0, la1, lo0, lo1] = bbox;
+  return CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1 && (!ring || pip(c.lon, c.lat, ring)));
+}
+
+/**
+ * Monthly cells of a region, from data/data.json only.
+ * - Region outside the covered area: every month is null ("no data"), never a synthetic series.
+ * - Inside: months of the covered period are summed over the cells in the region; a month without
+ *   a row is a real 0 (the export only writes cell-months with at least one detection).
+ */
+function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
+  const cv = coverage();
+  const empty = () => Array.from({ length: NY }, () => Array.from({ length: 12 }, (): Cell | null => null));
+  if (!cv || !overlapsCoverage(r.bbox)) return empty();
   const acc = Array.from({ length: NY }, () =>
     Array.from({ length: 12 }, () => ({ modis: 0, viirs: 0, harm: 0, wild: 0 })));
-  let first = { y: 9999, m: 0 };
-  for (const c of rows) {
+  for (const c of contractRows(r.bbox, ring)) {
     const k = isoWeekMonth(c.iso_year, c.iso_week);
     if (k.y < Y0 || k.y > Y1) continue;
-    if (k.y < first.y || (k.y === first.y && k.m < first.m)) first = k;
-    if (ring && !pip(c.lon, c.lat, ring)) continue;
     const a = acc[k.y - Y0][k.m];
     a.modis += c.modis_fire_days ?? 0;
     a.viirs += c.viirs_fire_days ?? 0;
     a.harm += c.harmonized_fire_days;
     a.wild += c.harmonized_fire_days * WILD_BY_LC[c.land_cover_class];
   }
-  const end = contractEnd();
+  const { first, last } = cv;
   return acc.map((row, yi) =>
-    row.map((raw, m): Cell | null => {
+    row.map((a, m): Cell | null => {
       const y = Y0 + yi;
-      const sc = monthScale(y, m);
-      const a = { modis: raw.modis * sc, viirs: raw.viirs * sc, harm: raw.harm * sc, wild: raw.wild * sc };
-      if (y < first.y || (y === first.y && m < first.m) || y > end.y || (y === end.y && m > end.m)) return null;
+      if (y < first.y || (y === first.y && m < first.m) || y > last.y || (y === last.y && m > last.m)) return null;
       const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
       return {
         y, m, modis: a.modis, viirs: a.viirs,
-        // FRP is not part of the contract: approximate from the region's mean FRP per fire-day.
+        // FRP is not part of the contract: approximate from the region's mean FRP per hotspot.
         mFrp: Math.round(a.modis * r.frp), vFrp: Math.round(a.viirs * r.frp * VFRP_BIAS),
         mEff: 1, hasV, wild: a.harm > 0 ? a.wild / a.harm : r.wild, harm: a.harm,
       };
     }));
-}
-
-function regionData(r: RegionDef, ring?: Ring): (Cell | null)[][] {
-  return contractRegionData(r, ring) ?? generateRegionData(r);
 }
 
 /** Value of a cell for a given harmonization variant / metric / fire-type filter. */
@@ -653,86 +615,16 @@ export function anomalyScan(vals: (CellVal | null)[][]): AnomalyResult | null {
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/* Hotspot point generator (synthetic, deterministic per month)               */
+/* Map points: one per data.json cell                                         */
 /* ────────────────────────────────────────────────────────────────────────── */
-
-interface Cluster { id: string; lat: number; lon: number; sp: number; w: number; peak: number; width: number; frp: number }
-
-const EXTRA_CLUSTERS: Cluster[] = [
-  { id: "sib", lat: 60, lon: 105, sp: 6, w: 28, peak: 6.9, width: 1.0, frp: 24 },
-  { id: "can", lat: 55, lon: -110, sp: 5, w: 22, peak: 7.0, width: 1.1, frp: 30 },
-  { id: "caf", lat: -6, lon: 22, sp: 7, w: 90, peak: 7.5, width: 1.3, frp: 20 },
-  { id: "saf", lat: 8, lon: 8, sp: 6, w: 80, peak: 0.8, width: 1.2, frp: 18 },
-  { id: "ind", lat: 23, lon: 80, sp: 5, w: 40, peak: 3.5, width: 1.0, frp: 16 },
-  { id: "idc", lat: 17, lon: 100, sp: 4, w: 45, peak: 2.8, width: 0.9, frp: 17 },
-  { id: "mex", lat: 20, lon: -100, sp: 4, w: 25, peak: 4.2, width: 0.9, frp: 21 },
-  { id: "arg", lat: -30, lon: -62, sp: 4, w: 25, peak: 8.6, width: 1.0, frp: 22 },
-  { id: "kaz", lat: 50, lon: 65, sp: 5, w: 18, peak: 7.8, width: 1.4, frp: 19 },
-  { id: "idn", lat: -2, lon: 112, sp: 5, w: 30, peak: 9.2, width: 1.0, frp: 27 },
-];
-let CLUSTERS_CACHE: Cluster[] | null = null;
-function getClusters(): Cluster[] {
-  if (CLUSTERS_CACHE) return CLUSTERS_CACHE;
-  const out: Cluster[] = [...EXTRA_CLUSTERS];
-  for (const r of REGIONS) {
-    const rng = mulberry32(hashStr("cl:" + r.id));
-    const [la0, la1, lo0, lo1] = r.bbox;
-    for (let k = 0; k < 3; k++) {
-      out.push({
-        id: `${r.id}${k}`, lat: la0 + (la1 - la0) * (0.2 + 0.6 * rng()), lon: lo0 + (lo1 - lo0) * (0.2 + 0.6 * rng()),
-        sp: Math.min(la1 - la0, lo1 - lo0) * 0.16, w: r.scale / 55, peak: r.peak, width: r.width + 0.1, frp: r.frp,
-      });
-    }
-  }
-  return (CLUSTERS_CACHE = out);
-}
 
 interface HotFeature {
   type: "Feature";
   geometry: { type: "Point"; coordinates: [number, number] };
-  /** `days` is only set on points derived from data/data.json (fire-days in the cell for that month). */
-  properties: { frp: number; sensor: "MODIS" | "VIIRS" | "Harmonized"; date: string; days?: number };
+  /** n = value shown (raw: MODIS + VIIRS, harmonized: harmonized count), same rule as the calendar. */
+  properties: { n: number; modis: number; viirs: number; harm: number; cell: string; period: string };
 }
 type HotCollection = { type: "FeatureCollection"; features: HotFeature[] };
-
-function buildHotspots(y: number, m: number, variant: Variant): HotCollection {
-  const features: HotFeature[] = [];
-  if ((y === Y0 && m < FIRST_MONTH_Y0) || y < Y0 || y > Y1 || (y === Y1 && m > LAST_MONTH_Y1)) return { type: "FeatureCollection", features };
-  const yi = y - Y0;
-  const frac = yi / (NY - 1);
-  const t = m + 0.5;
-  const terraOnly = y < 2002 || (y === 2002 && m < 6);
-  const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
-  const date = `${y}-${String(m + 1).padStart(2, "0")}`;
-  for (const c of getClusters()) {
-    const rng = mulberry32(hashStr(`${c.id}:${y}-${m}`));
-    const peak = c.peak - 0.3 * frac;
-    let d = Math.abs(t - peak);
-    d = Math.min(d, 12 - d);
-    const season = 0.03 + Math.exp(-0.5 * (d / (c.width + 0.2 * frac)) ** 2);
-    const n = c.w * season * (1 + 0.012 * yi) * Math.exp(gauss(rng) * 0.2);
-    const nM = Math.round(n * (terraOnly ? 0.6 : 1));
-    const nV = hasV ? Math.round(n * (variant === "raw" ? R_NOM : 1)) : 0;
-    const coslat = Math.max(0.2, Math.cos(c.lat * D2R));
-    const emit = (cnt: number, sensor: "MODIS" | "VIIRS") => {
-      for (let i = 0; i < cnt; i++) {
-        const lat = clamp(c.lat + gauss(rng) * c.sp, -85, 85);
-        const lon = c.lon + (gauss(rng) * c.sp) / coslat;
-        let frp = c.frp * Math.exp(gauss(rng) * 0.8);
-        if (sensor === "VIIRS" && variant === "raw") frp = (frp * VFRP_BIAS) / R_NOM;
-        features.push({ type: "Feature", geometry: { type: "Point", coordinates: [lon, lat] }, properties: { frp: Math.round(frp * 10) / 10, sensor, date } });
-      }
-    };
-    if (variant === "raw") {
-      emit(nM, "MODIS");
-      emit(nV, "VIIRS");
-    } else if (hasV) {
-      emit(Math.round(n / 2), "MODIS");
-      emit(Math.round(n / 2), "VIIRS");
-    } else emit(Math.round(n * (terraOnly ? 1 : 1)), "MODIS");
-  }
-  return { type: "FeatureCollection", features };
-}
 
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Geometry helpers                                                           */
@@ -762,120 +654,56 @@ function regionFromRing(ring: Ring): RegionDef {
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/* Export helper (replace body when real FIRMS data is available)             */
+/* Points and CSV export, both from data/data.json                            */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-interface ExportRow {
-  latitude: number;
-  longitude: number;
-  acq_date: string;
-  sensor: string;
-  frp: number;
-  data_status: string;
-}
-
-function getHotspotsForExport(ring: Ring, range: DateRange): { rows: ExportRow[]; count: number } {
-  const rows: ExportRow[] = [];
-  for (let y = range.from.y; y <= range.to.y; y++) {
-    const mStart = y === range.from.y ? range.from.m : 0;
-    const mEnd = y === range.to.y ? range.to.m : 11;
-    for (let m = mStart; m <= mEnd; m++) {
-      const hots = buildHotspots(y, m, "raw");
-      for (const f of hots.features) {
-        const [lon, lat] = f.geometry.coordinates;
-        if (pip(lon, lat, ring)) {
-          rows.push({
-            latitude: lat,
-            longitude: lon,
-            acq_date: f.properties.date,
-            sensor: f.properties.sensor,
-            frp: f.properties.frp,
-            data_status: "SIMULATED",
-          });
-        }
-      }
-    }
-  }
-  return { rows, count: rows.length };
-}
-
-/* ────────────────────────────────────────────────────────────────────────── */
-/* Map points for a selected region + study period                            */
-/* ────────────────────────────────────────────────────────────────────────── */
-
-const MAX_MAP_POINTS = 40000;
 const MORPH_MS = 1100; // globe <-> plan animation
-const MAX_POINTS_PER_CELL_MONTH = 31;
 const monthKey = (y: number, m: number) => y * 12 + m;
-
-interface RangeHotspots { fc: HotCollection; source: "contract" | "simulated"; capped: boolean }
+const ym = (k: number) => `${Math.floor(k / 12)}-${String((k % 12) + 1).padStart(2, "0")}`;
 
 /**
- * Points shown on the map for the Region card (selection + From/To study period).
- * - If data/data.json has cells inside the region bbox (same test as regionData), one point per
- *   cell and month is drawn from the contract's fire-days (raw: MODIS / VIIRS, harmonized: one point).
- * - Otherwise falls back to the synthetic generator over the period, like regionData does.
+ * Map points for a month range: one point per data.json cell (at the cell centre, data.json has no
+ * finer position), carrying the cell's hotspot count over the range. Summing n over the points gives
+ * exactly the calendar total for the same region, period and mode.
  */
-function buildRangeHotspots(sel: { region: RegionDef; ring: Ring }, range: DateRange, variant: Variant): RangeHotspots {
-  const { region, ring } = sel;
-  const [la0, la1, lo0, lo1] = region.bbox;
-  const kLo = monthKey(range.from.y, range.from.m), kHi = monthKey(range.to.y, range.to.m);
-
-  const inBbox = CONTRACT.filter((c) => c.lat >= la0 && c.lat <= la1 && c.lon >= lo0 && c.lon <= lo1);
-  if (inBbox.length) {
-    const acc = new Map<string, { lat: number; lon: number; y: number; m: number; modis: number; viirs: number; harm: number }>();
-    for (const c of inBbox) {
-      if (!pip(c.lon, c.lat, ring)) continue;
-      const k = isoWeekMonth(c.iso_year, c.iso_week);
-      const key = monthKey(k.y, k.m);
-      if (key < kLo || key > kHi) continue;
-      const id = `${c.cell_id}:${key}`;
-      let a = acc.get(id);
-      if (!a) acc.set(id, (a = { lat: c.lat, lon: c.lon, y: k.y, m: k.m, modis: 0, viirs: 0, harm: 0 }));
-      a.modis += c.modis_fire_days ?? 0;
-      a.viirs += c.viirs_fire_days ?? 0;
-      a.harm += c.harmonized_fire_days;
-    }
-    // Same 4/5-week normalisation as the calendar, so points and calendar agree.
-    for (const a of acc.values()) {
-      const sc = monthScale(a.y, a.m);
-      a.modis *= sc; a.viirs *= sc; a.harm *= sc;
-    }
-    const features: HotFeature[] = [];
-    const frp = Math.round(region.frp * 10) / 10; // FRP is not in the contract: region mean per fire-day
-    // The contract only has fire-days per 0.1° cell and month (no positions): draw one point per
-    // fire-day (capped), spread deterministically inside the cell so density follows the counts.
-    const add = (a: { lat: number; lon: number; y: number; m: number }, id: string, sensor: HotFeature["properties"]["sensor"], days: number) => {
-      const n = Math.min(MAX_POINTS_PER_CELL_MONTH, Math.round(days));
-      if (n <= 0) return;
-      const rng = mulberry32(hashStr(`${id}:${sensor}`));
-      const date = `${a.y}-${String(a.m + 1).padStart(2, "0")}`;
-      for (let i = 0; i < n; i++) {
-        features.push({
-          type: "Feature",
-          geometry: { type: "Point", coordinates: [a.lon + (rng() - 0.5) * 0.1, a.lat + (rng() - 0.5) * 0.1] },
-          properties: { frp, sensor, days: 1, date },
-        });
-      }
-    };
-    for (const [id, a] of acc) {
-      if (variant === "raw") { add(a, id, "MODIS", a.modis); add(a, id, "VIIRS", a.viirs); }
-      else add(a, id, "Harmonized", a.harm);
-    }
-    return { fc: { type: "FeatureCollection", features }, source: "contract", capped: false };
+function contractPoints(bbox: [number, number, number, number] | null, ring: Ring | undefined, kLo: number, kHi: number, variant: Variant): HotCollection {
+  const acc = new Map<string, { lat: number; lon: number; modis: number; viirs: number; harm: number }>();
+  for (const c of contractRows(bbox, ring)) {
+    const k = isoWeekMonth(c.iso_year, c.iso_week);
+    const key = monthKey(k.y, k.m);
+    if (key < kLo || key > kHi) continue;
+    let a = acc.get(c.cell_id);
+    if (!a) acc.set(c.cell_id, (a = { lat: c.lat, lon: c.lon, modis: 0, viirs: 0, harm: 0 }));
+    a.modis += c.modis_fire_days ?? 0;
+    a.viirs += c.viirs_fire_days ?? 0;
+    a.harm += c.harmonized_fire_days;
   }
-
+  const period = kLo === kHi ? ym(kLo) : `${ym(kLo)} → ${ym(kHi)}`;
   const features: HotFeature[] = [];
-  for (let key = kLo; key <= kHi; key++) {
-    const y = Math.floor(key / 12), m = key % 12;
-    for (const f of buildHotspots(y, m, variant).features) {
-      const [lon, lat] = f.geometry.coordinates;
-      if (lat >= la0 && lat <= la1 && lon >= lo0 && lon <= lo1 && pip(lon, lat, ring)) features.push(f);
-    }
+  for (const [cell, a] of acc) {
+    const n = variant === "raw" ? a.modis + a.viirs : a.harm;
+    if (n <= 0) continue;
+    features.push({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [a.lon, a.lat] },
+      properties: { n: Math.round(n * 100) / 100, modis: a.modis, viirs: a.viirs, harm: Math.round(a.harm * 100) / 100, cell, period },
+    });
   }
-  const capped = features.length > MAX_MAP_POINTS;
-  const kept = capped ? features.filter((_, i) => i % Math.ceil(features.length / MAX_MAP_POINTS) === 0) : features;
-  return { fc: { type: "FeatureCollection", features: kept }, source: "simulated", capped };
+  return { type: "FeatureCollection", features };
+}
+
+/** CSV rows of data.json for the selection and study period (one row per cell x month). */
+function exportRows(sel: { region: RegionDef; ring: Ring }, range: DateRange): string[] {
+  const kLo = monthKey(range.from.y, range.from.m), kHi = monthKey(range.to.y, range.to.m);
+  const out: string[] = [];
+  for (const c of contractRows(sel.region.bbox, sel.ring)) {
+    const k = isoWeekMonth(c.iso_year, c.iso_week);
+    const key = monthKey(k.y, k.m);
+    if (key < kLo || key > kHi) continue;
+    out.push([c.cell_id, c.lat, c.lon, ym(key), c.modis_fire_days ?? "", c.viirs_fire_days ?? "",
+      c.harmonized_fire_days, c.harmonized_low, c.harmonized_high, c.source].join(","));
+  }
+  return out.sort();
 }
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -933,6 +761,31 @@ function heatColor(t: number): string {
   }
   return "rgb(127,29,29)";
 }
+/** Diverging blue → white → red scale of the "warming stripes" (ColorBrewer RdBu, 9 classes). */
+const STRIPE_STOPS: [number, number, number][] = [
+  [8, 48, 107], [33, 102, 172], [67, 147, 195], [146, 197, 222], [247, 247, 247],
+  [253, 219, 199], [244, 165, 130], [214, 96, 77], [178, 24, 43], [103, 0, 13],
+];
+/** t in [-1, 1]: -1 = far fewer fires than the region's average year, +1 = far more. */
+function stripeColor(t: number): string {
+  const x = ((clamp(t, -1, 1) + 1) / 2) * (STRIPE_STOPS.length - 1);
+  const i = Math.min(Math.floor(x), STRIPE_STOPS.length - 2), f = x - i;
+  const [a, b] = [STRIPE_STOPS[i], STRIPE_STOPS[i + 1]];
+  return `rgb(${a.map((c, k) => Math.round(c + (b[k] - c) * f)).join(",")})`;
+}
+/**
+ * One colour per year from the annual fire totals of the region: centred on the mean year,
+ * scaled by the largest deviation, so the palest stripe is a typical year and the darkest
+ * red / blue are the most / least active years. Years without data stay null (grey).
+ */
+function stripeColors(annual: AnnualPt[]): (string | null)[] {
+  const vs = annual.map((p) => p.value).filter((v): v is number => v !== null);
+  if (!vs.length) return annual.map(() => null);
+  const mean = vs.reduce((a, b) => a + b, 0) / vs.length;
+  const dev = Math.max(...vs.map((v) => Math.abs(v - mean))) || 1;
+  return annual.map((p) => (p.value === null ? null : stripeColor((p.value - mean) / dev)));
+}
+
 function niceTicks(max: number, n = 3): number[] {
   if (max <= 0) return [0, 1];
   const raw = max / n;
@@ -1051,21 +904,20 @@ function RegionCard({ selection, name, onRename, range, onRangeChange, onApplyBb
 
   const handleExport = () => {
     setExportErr("");
-    const { rows, count } = getHotspotsForExport(selection.ring, range);
-    if (count > 200000) {
-      setExportErr(`Too many rows (${count.toLocaleString("en-US")}). Reduce the area or time period.`);
+    const rows = exportRows(selection, range);
+    if (!rows.length) {
+      setExportErr("No data.json hotspots in this area and period.");
       return;
     }
     const safeName = name.replace(/[^a-z0-9]/gi, "_");
     const fromStr = toMonthStr(range.from.y, range.from.m);
     const toStr = toMonthStr(range.to.y, range.to.m);
-    const header = "latitude,longitude,acq_date,sensor,frp,data_status\n";
-    const body = rows.map((r) => `${r.latitude},${r.longitude},${r.acq_date},${r.sensor},${r.frp},${r.data_status}`).join("\n");
-    const blob = new Blob([header + body], { type: "text/csv" });
+    const header = "cell_id,lat,lon,month,modis_hotspots,viirs_hotspots,harmonized_hotspots,harmonized_low,harmonized_high,source\n";
+    const blob = new Blob([header + rows.join("\n") + "\n"], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `vigil_${safeName}_${fromStr}_${toStr}_SIMULATED.csv`;
+    a.download = `vigil_${safeName}_${fromStr}_${toStr}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1302,17 +1154,26 @@ export default function Vigil() {
   const rawAnnual = useMemo(() => annualSeries(rawVals), [rawVals]);
   const harmAnnual = useMemo(() => annualSeries(harmVals), [harmVals]);
   const heatMax = useMemo(() => absoluteHeatMax(mode), [mode]);
+  const annual = mode === "raw" ? rawAnnual : harmAnnual;
+  const stripes = useMemo(() => stripeColors(annual), [annual]);
 
   const deferredRange = useDeferredValue(selRange); // keep the date selects responsive while points rebuild
   // With a selection, the Region card's study period drives the map; otherwise the single-month slider does.
-  const rangeHot = useMemo(
-    () => (selection ? buildRangeHotspots(selection, deferredRange, mode) : null),
-    [selection, deferredRange, mode],
-  );
-  const hotspots = useMemo(
-    () => rangeHot?.fc ?? buildHotspots(date.y, date.m, mode),
-    [rangeHot, date, mode],
-  );
+  const hotspots = useMemo(() => {
+    if (selection) {
+      return contractPoints(selection.region.bbox, selection.ring,
+        monthKey(deferredRange.from.y, deferredRange.from.m), monthKey(deferredRange.to.y, deferredRange.to.m), mode);
+    }
+    return contractPoints(null, undefined, monthKey(date.y, date.m), monthKey(date.y, date.m), mode);
+  }, [selection, deferredRange, date, mode]);
+  const pointTotal = useMemo(() => hotspots.features.reduce((a, f) => a + f.properties.n, 0), [hotspots]);
+  const covered = selection ? overlapsCoverage(selection.region.bbox) : true;
+  const fullyCovered = selection ? insideCoverage(selection.region.bbox) : true;
+  const cov = coverage();
+  const covText = cov ? `data.json covers ${fmtLat(cov.la0)}–${fmtLat(cov.la1)}, ${fmtLon(cov.lo0)}–${fmtLon(cov.lo1)}` : "data.json is empty";
+  const coverageNote = !covered
+    ? `No data for this area: ${covText}.`
+    : !fullyCovered ? `Partial coverage: only the part inside data.json is counted (${covText}).` : "";
 
   /* ── Map: push GeoJSON into sources ── */
   const pushSources = useCallback(() => {
@@ -1433,8 +1294,10 @@ export default function Vigil() {
           map.addLayer({
             id: "hotspots", type: "circle", source: "hotspots",
             paint: {
-              "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 1.4, 5, 2.6, 9, 5, 13, 9],
-              "circle-color": ["step", ["get", "frp"], "#fbbf24", 15, "#f97316", 40, "#ea580c", 90, "#dc2626"],
+              "circle-radius": ["interpolate", ["linear"], ["zoom"],
+                2, ["interpolate", ["linear"], ["sqrt", ["get", "n"]], 0, 1.5, 30, 8],
+                8, ["interpolate", ["linear"], ["sqrt", ["get", "n"]], 0, 3, 30, 20]],
+              "circle-color": ["step", ["get", "n"], "#fbbf24", 5, "#f97316", 20, "#ea580c", 100, "#dc2626"],
               "circle-opacity": 0.85, "circle-stroke-color": "#ffffff", "circle-stroke-width": 0.5, "circle-stroke-opacity": 0.8,
             },
           });
@@ -1455,11 +1318,13 @@ export default function Vigil() {
       map.on("click", "hotspots", (e: MapLayerMouseEvent) => {
         if (toolRef.current !== "none" || !map || !e.features?.length) return;
         const f = e.features[0];
-        const p = f.properties as { frp: number; sensor: string; date: string; days?: number };
+        const p = f.properties as { modis: number; viirs: number; harm: number; cell: string; period: string };
         const [lng, lat] = (f.geometry as unknown as { coordinates: [number, number] }).coordinates;
+        const num = (v: unknown) => fmtInt(Number(v) || 0);
+        const esc = (v: unknown) => String(v).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
         new maplibregl.Popup({ closeButton: false, offset: 8, className: "hd-popup" })
           .setLngLat([lng, lat])
-          .setHTML(`<table>${p.days != null ? `<tr><td>Fire-day</td><td>${p.sensor} · cell data.json</td></tr>` : `<tr><td>FRP</td><td>${Number(p.frp).toFixed(1)} MW</td></tr>`}<tr><td>Sensor</td><td>${p.sensor}</td></tr><tr><td>Date</td><td>${p.date}</td></tr><tr><td>Lat/Lon</td><td>${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
+          .setHTML(`<table><tr><td>Harmonized</td><td>${Number(p.harm).toFixed(1)} hotspots</td></tr><tr><td>MODIS</td><td>${num(p.modis)}</td></tr><tr><td>VIIRS</td><td>${num(p.viirs)}</td></tr><tr><td>Period</td><td>${esc(p.period)}</td></tr><tr><td>Cell</td><td>${CELL_DEG}° · ${lat.toFixed(3)}, ${lng.toFixed(3)}</td></tr></table>`)
           .addTo(map);
       });
 
@@ -1686,7 +1551,7 @@ export default function Vigil() {
       ))}
       <div className="hd-heat-legend">
         <span>0</span><i />
-        <span>≥ {fmtInt(Math.round(heatMax))} fire-days / month · same scale for every region</span>
+        <span>{covered ? `≥ ${fmtInt(Math.round(heatMax))} hotspots / month · same scale for every region` : "No data.json coverage for this area"}</span>
       </div>
     </div>
   );
@@ -1793,14 +1658,13 @@ export default function Vigil() {
       {/* Date + legend */}
       <div className="hd-datechip">
         <div className="hd-date-row">
-          {rangeHot ? (
+          {selection ? (
             <>
               <b className="hd-mono">
                 {`${selRange.from.y}-${String(selRange.from.m + 1).padStart(2, "0")} → ${selRange.to.y}-${String(selRange.to.m + 1).padStart(2, "0")}`}
               </b>
               <span className="hd-mono">
-                {fmtInt(hotspots.features.length)} {rangeHot.source === "contract" ? "fire-days (data.json)" : "hotspots (simulated)"}
-                {rangeHot.capped ? ` · sampled to ${fmtInt(MAX_MAP_POINTS)}` : ""}
+                {fmtInt(pointTotal)} {mode === "raw" ? "hotspots (raw)" : "harmonized hotspots"} · {fmtInt(hotspots.features.length)} cells
               </span>
             </>
           ) : (
@@ -1808,18 +1672,36 @@ export default function Vigil() {
               <button onClick={() => stepDate(-1)} aria-label="Previous month">‹</button>
               <b className="hd-mono">{date.y}-{String(date.m + 1).padStart(2, "0")}</b>
               <button onClick={() => stepDate(1)} aria-label="Next month">›</button>
-              <span className="hd-mono">{fmtInt(hotspots.features.length)} hotspots</span>
+              <span className="hd-mono">{fmtInt(pointTotal)} {mode === "raw" ? "hotspots (raw)" : "harmonized hotspots"}</span>
               {(date.y !== LATEST.y || date.m !== LATEST.m) && <button className="hd-link" onClick={() => setDate(LATEST)}>Latest</button>}
             </>
           )}
         </div>
+        {coverageNote && <div className="hd-nodata">{coverageNote}</div>}
         <div className="hd-frp-legend">
-          <span>FRP MW</span>
-          {[["#fbbf24", "<15"], ["#f97316", "15–40"], ["#ea580c", "40–90"], ["#dc2626", "≥90"]].map(([c, t]) => (
+          <span>Hotspots / {CELL_DEG}° cell</span>
+          {[["#fbbf24", "<5"], ["#f97316", "5–20"], ["#ea580c", "20–100"], ["#dc2626", "≥100"]].map(([c, t]) => (
             <span key={t}><i style={{ background: c }} />{t}</span>
           ))}
         </div>
       </div>
+
+      {/* Fire stripes: one stripe per year, top right of the globe */}
+      {selection && covered && (
+        <div className="hd-stripes-card">
+          <div className="hd-stripes" role="img" aria-label={`Fire stripes ${Y0}–${Y1} for ${selectionName}: one stripe per year, blue = fewer fires, red = more fires than the average year`}>
+            {stripes.map((c, yi) => (
+              <i
+                key={yi}
+                className={c ? "" : "empty"}
+                style={{ background: c ?? undefined }}
+                title={`${Y0 + yi}: ${annual[yi].value === null ? "no data" : `${fmtInt(annual[yi].value!)} ${unit(metric)}${annual[yi].est ? " (estimated, partial year)" : ""}`}`}
+              />
+            ))}
+          </div>
+          <div className="hd-stripes-axis"><span>{Y0}</span><span>fires / year</span><span>{Y1}</span></div>
+        </div>
+      )}
 
       {/* Left panel: Region card */}
       {selection && (
@@ -1980,6 +1862,7 @@ const CSS = `
 .hd-date-row button{border:0;background:rgba(15,23,42,.06);width:22px;height:22px;border-radius:6px;line-height:1;font-size:15px;padding:0}
 .hd-date-row button:hover{background:var(--bg2)}
 .hd-date-row .hd-link{width:auto;border:0;background:none;color:var(--or);font-weight:600;font-size:12px;padding:0 2px;height:auto}
+.hd-nodata{margin-top:4px;color:#b45309;font-size:11px;max-width:340px}
 .hd-frp-legend{display:flex;gap:10px;color:var(--mut);font-size:11px;align-items:center}
 .hd-frp-legend span{display:inline-flex;align-items:center;gap:4px}
 .hd-frp-legend i{width:9px;height:9px;border-radius:50%}
@@ -2019,6 +1902,12 @@ const CSS = `
 .hd-heat-row{font-size:9px;color:var(--mut);display:flex;align-items:center;font-variant-numeric:tabular-nums;line-height:1;font-family:ui-monospace,Menlo,monospace}
 .hd-cell{height:8px;border-radius:1px;cursor:pointer}
 .hd-cell.empty{background:repeating-linear-gradient(45deg,#f1f5f9 0 2px,#e2e8f0 2px 3px);cursor:default}
+.hd-stripes-card{position:absolute;top:62px;right:56px;z-index:5;width:240px;padding:6px;display:flex;flex-direction:column;gap:3px;
+  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-radius:8px;box-shadow:0 2px 12px rgba(15,23,42,.12)}
+.hd-stripes{display:flex;height:96px;border-radius:5px;overflow:hidden}
+.hd-stripes i{flex:1;min-width:0}
+.hd-stripes i.empty{background:repeating-linear-gradient(45deg,#e2e8f0 0 2px,#f8fafc 2px 4px)}
+.hd-stripes-axis{display:flex;justify-content:space-between;font-size:9.5px;color:var(--mut)}
 .hd-heat-legend{grid-column:1 / -1;display:flex;align-items:center;gap:6px;margin-top:4px;font-size:9.5px;color:var(--mut)}
 .hd-heat-legend i{flex:0 0 46px;height:6px;border-radius:2px;background:linear-gradient(90deg,#e8edf3,rgb(254,243,199) 4%,rgb(252,211,77) 25%,rgb(251,146,60) 50%,rgb(234,88,12) 72%,rgb(220,38,38) 88%,rgb(127,29,29))}
 .hd-cell.out{opacity:.35}
@@ -2102,6 +1991,8 @@ const CSS = `
   .hd-panel-left{left:8px;right:8px;width:auto;top:auto;bottom:calc(50vh + 24px);max-height:36vh}
   .hd-datechip{display:none}
   .hd-toolbar{right:50px}
+  .hd-stripes-card{width:150px;right:50px}
+  .hd-stripes{height:56px}
 }
 @media (prefers-reduced-motion:reduce){.hd-root *{transition:none!important}}
 `;
