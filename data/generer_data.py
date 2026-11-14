@@ -1,4 +1,6 @@
-"""Regenerate data/data.json: SIMULATED weekly fire-days with realistic climatology.
+"""SIMULATED weekly fire-days (demo only) -> data/data_simule.json, never data/data.json.
+
+data/data.json is the REAL file, produced by `python -m pipeline.v2.export_contrat` (FIRMS, VIGIL-K1).
 
 This is NOT FIRMS data. The raw FIRMS files are not in the repo (data/raw is empty, the real
 pipeline reads them from a private folder). This script writes a file that follows the frozen
@@ -24,7 +26,9 @@ import random
 
 SEED = 20261114
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "data.json")
+# NEVER data.json: data/data.json holds the REAL harmonized FIRMS data (pipeline/v2/export_contrat.py).
+# This simulator only writes a separate demo file.
+OUT = os.path.join(HERE, "data_simule.json")
 
 FIRST = (2003, 1)        # first ISO week written (MODIS Terra+Aqua era)
 LAST = (2026, 43)        # last ISO week written (end of Oct 2026)

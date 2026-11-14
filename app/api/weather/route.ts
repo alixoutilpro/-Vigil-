@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cellToLatLng } from "h3-js";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 export const dynamic = "force-dynamic";
 
-const CACHE_DIR = path.join(process.cwd(), "data", "weather-cache");
+// On Vercel the deployment folder is read-only: only the temp dir is writable (cache then lives per instance).
+const CACHE_DIR = process.env.VERCEL ? path.join(os.tmpdir(), "weather-cache") : path.join(process.cwd(), "data", "weather-cache");
 const MAX_CELLS = 50;
 const PARAMS = "t_max_2m_24h:C,precip_24h:mm,relative_humidity_2m:p,wind_speed_10m:ms";
 
@@ -20,8 +22,10 @@ function loadCache(cellId: string): MonthRecord[] {
 }
 
 function saveCache(cellId: string, data: MonthRecord[]) {
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.writeFileSync(path.join(CACHE_DIR, `${cellId}.json`), JSON.stringify(data));
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(CACHE_DIR, `${cellId}.json`), JSON.stringify(data));
+  } catch { /* cache is optional: a read-only disk must never fail the request */ }
 }
 
 function mk(y: number, m: number) { return `${y}-${m}`; }
