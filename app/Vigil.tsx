@@ -430,6 +430,39 @@ function isoWeekMonth(isoYear: number, isoWeek: number): { y: number; m: number 
   return { y: thu.getUTCFullYear(), m: thu.getUTCMonth() };
 }
 
+/**
+ * Weeks are attributed to the month of their Thursday, so a month holds 4 or 5 weeks of data.
+ * Summing raw weeks would inflate every 5-Thursday month by ~25% and under-count a partial last month.
+ * monthScale() converts "sum of the weeks present" into a per-calendar-month figure:
+ * days in month / (7 x number of weeks actually covered by the data in that month).
+ */
+let LAST_THURSDAY: number | null = null;
+function lastContractThursday(): number {
+  if (LAST_THURSDAY !== null) return LAST_THURSDAY;
+  let best = 0;
+  for (const r of CONTRACT) {
+    const t = Date.UTC(r.iso_year, 0, 4 + (r.iso_week - 1) * 7 + (4 - (new Date(Date.UTC(r.iso_year, 0, 4)).getUTCDay() || 7)));
+    if (t > best) best = t;
+  }
+  return (LAST_THURSDAY = best);
+}
+const MONTH_SCALE = new Map<number, number>();
+function monthScale(y: number, m: number): number {
+  const key = y * 12 + m;
+  const hit = MONTH_SCALE.get(key);
+  if (hit !== undefined) return hit;
+  const dim = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const last = lastContractThursday();
+  let covered = 0;
+  for (let d = 1; d <= dim; d++) {
+    const t = Date.UTC(y, m, d);
+    if (new Date(t).getUTCDay() === 4 && t <= last) covered++;
+  }
+  const f = covered > 0 ? dim / (7 * covered) : 1;
+  MONTH_SCALE.set(key, f);
+  return f;
+}
+
 let CONTRACT_END: { y: number; m: number } | null = null;
 function contractEnd() {
   if (CONTRACT_END) return CONTRACT_END;
@@ -464,8 +497,10 @@ function contractRegionData(r: RegionDef, ring?: Ring): (Cell | null)[][] | null
   }
   const end = contractEnd();
   return acc.map((row, yi) =>
-    row.map((a, m): Cell | null => {
+    row.map((raw, m): Cell | null => {
       const y = Y0 + yi;
+      const sc = monthScale(y, m);
+      const a = { modis: raw.modis * sc, viirs: raw.viirs * sc, harm: raw.harm * sc, wild: raw.wild * sc };
       if (y < first.y || (y === first.y && m < first.m) || y > end.y || (y === end.y && m > end.m)) return null;
       const hasV = y > VIIRS_START.y || (y === VIIRS_START.y && m >= VIIRS_START.m);
       return {
@@ -799,6 +834,11 @@ function buildRangeHotspots(sel: { region: RegionDef; ring: Ring }, range: DateR
       a.modis += c.modis_fire_days ?? 0;
       a.viirs += c.viirs_fire_days ?? 0;
       a.harm += c.harmonized_fire_days;
+    }
+    // Same 4/5-week normalisation as the calendar, so points and calendar agree.
+    for (const a of acc.values()) {
+      const sc = monthScale(a.y, a.m);
+      a.modis *= sc; a.viirs *= sc; a.harm *= sc;
     }
     const features: HotFeature[] = [];
     const frp = Math.round(region.frp * 10) / 10; // FRP is not in the contract: region mean per fire-day
