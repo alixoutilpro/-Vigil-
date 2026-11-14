@@ -1395,7 +1395,7 @@ export default function Vigil() {
       <OrbitOverlay mapRef={mapRef} ready={ready} visible={!selection && !flat} enterDelayMs={MORPH_MS} />
 
       {/* Toolbar */}
-      <div className="hd-toolbar">
+      {!split && <div className="hd-toolbar">
         <img className="hd-logo" src="/vigil-logo.png" alt="Vigil" />
 
         {/* Country search */}
@@ -1446,9 +1446,9 @@ export default function Vigil() {
           <button className="hd-btn" onClick={() => setFlat(!flat)} aria-pressed={flat} title={flat ? "Switch to 3D globe" : "Switch to 2D map"}>{flat ? "3D" : "2D"}</button>
         </div>
         {index?.fixture && <span className="hd-fixture" title={`${BASE}/index.json is marked fixture: true`}>Demo data (fixture), not the real export</span>}
-      </div>
+      </div>}
 
-      {tool !== "none" && (
+      {!split && tool !== "none" && (
         <div className="hd-hintbar">
           {tool === "box" ? "Drag on the map" : polyN < 3 ? `Click to add vertices (${polyN})` : "Click first vertex, double-click, or Enter to close"}
           <span>Esc to cancel</span>
@@ -1456,7 +1456,7 @@ export default function Vigil() {
       )}
 
       {/* Left panel: Region card */}
-      {selection && bornes && (
+      {!split && selection && bornes && (
         <aside ref={leftDrag.ref} style={leftDrag.style} className={"hd-panel-left hd-glass" + (panelLeftOpen ? "" : " collapsed") + (leftDrag.dragging ? " dragging" : "")} aria-label="Region settings">
           <div className="hd-panel-head" {...leftDrag.handle}>
             <span className="hd-mono hd-name">{selectionName}</span>
@@ -1483,7 +1483,7 @@ export default function Vigil() {
       )}
 
       {/* Analytics panel */}
-      {selection && (
+      {!split && selection && (
         <aside ref={rightDrag.ref} style={rightDrag.style} className={"hd-panel hd-glass" + (panelOpen ? "" : " collapsed") + (rightDrag.dragging ? " dragging" : "")} aria-label="Analytics">
           <div className="hd-panel-head" {...rightDrag.handle}>
             <div className="hd-head-actions">
