@@ -16,6 +16,7 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MLMap, GeoJSONSource, StyleSpecification, MapLayerMouseEvent } from "maplibre-gl";
+import OrbitOverlay from "./OrbitOverlay";
 import {
   BASE, ErreurDonnees, centreHex, chargerIncertitude, chargerIndex, chargerMois, chargerPays, chargerTuile,
   cleMois, contourHex, dansZone, estConverti, indiceMois, moisPartiel, texteMois, tuilesDeZone,
@@ -1398,6 +1399,8 @@ export default function Vigil() {
     <div className="hd-root">
       <style dangerouslySetInnerHTML={{ __html: CSS }} />
       <div ref={containerRef} className="hd-map" />
+      {/* Decorative MODIS / VIIRS orbits over the globe until a region is picked */}
+      <OrbitOverlay mapRef={mapRef} ready={ready} visible={!selection && !flat} enterDelayMs={MORPH_MS} />
 
       {/* Toolbar */}
       <div className="hd-toolbar">
