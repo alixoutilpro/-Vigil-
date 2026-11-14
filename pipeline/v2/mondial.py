@@ -173,7 +173,7 @@ def agreger(a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Vigil v2 - VIGIL-K1 a l'echelle mondiale")
-    ap.add_argument("commande", choices=["agreger", "calibrer"])
+    ap.add_argument("commande", choices=["agreger", "calibrer", "calibrer-frp"])
     ap.add_argument("--brut", default=P.DOSSIER_BRUT)
     ap.add_argument("--sortie", default=P.DOSSIER_SORTIE)
     ap.add_argument("--frontieres", default=P.FICHIER_FRONTIERES)
@@ -188,6 +188,9 @@ def main(argv=None):
         ap.error(f"tables inconnues : {sorted(inconnues)}")
     if a.commande == "agreger":
         agreger(a)
+    elif a.commande == "calibrer-frp":
+        from .mondial_frp import calibrer_frp
+        calibrer_frp(a)
     else:
         from .mondial_calibration import calibrer
         calibrer(a)
