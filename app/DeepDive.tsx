@@ -746,14 +746,14 @@ const DD_CSS = `
 .dd-hint{font-size:10px;color:#475569}
 .dd-def{cursor:help;border-bottom:1px dotted rgba(15,23,42,.45);outline:none;border-radius:2px}
 .dd-def:focus-visible{outline:2px solid #ea580c;outline-offset:2px}
-.dd-pop{position:fixed;z-index:80;background:rgba(15,23,42,.96);color:#f8fafc;border-radius:8px;padding:8px 10px;font:12px/1.4 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(15,23,42,.25);pointer-events:none;text-transform:none;letter-spacing:0;font-weight:400}
+.dd-pop{position:fixed;z-index:80;background:#fff;color:#0f172a;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font:12px/1.4 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(15,23,42,.25);pointer-events:none;text-transform:none;letter-spacing:0;font-weight:400}
 .dd-tt{font-weight:700;margin-bottom:4px;font-family:ui-monospace,Menlo,monospace}
 .dd-tr{display:flex;justify-content:space-between;gap:10px;padding:1px 0}
-.dd-tr span{color:#cbd5e1}
+.dd-tr span{color:#475569}
 .dd-tr b{font-weight:650;font-variant-numeric:tabular-nums;text-align:right}
 .dd-tr.dim{font-size:11px}
-.dd-tn{font-size:10.5px;color:#fde68a;margin-top:3px}
-.dd-sep{height:1px;background:rgba(148,163,184,.35);margin:5px 0}
+.dd-tn{font-size:10.5px;color:#b45309;margin-top:3px}
+.dd-sep{height:1px;background:#e2e8f0;margin:5px 0}
 .dd-cal{display:grid;grid-template-columns:62px repeat(12,minmax(30px,1fr)) minmax(70px,1.25fr);gap:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums;user-select:none}
 .dd-cal-panel{overflow-x:auto}
 .dd-ch{font-size:10px;font-weight:650;text-align:center;color:#1e293b;font-family:Inter,ui-sans-serif,system-ui,sans-serif}
