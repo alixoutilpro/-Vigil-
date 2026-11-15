@@ -202,7 +202,11 @@ Weather in the dashboard is optional (Meteomatics; `MM_USER` / `MM_PASS` server 
 ## Team & credits
 
 Built by team **Vigil** for NASA Space Apps Challenge 2026, Paris.
-<!-- TODO: names and roles -->
+| Member | Role |
+|---|---|
+| Alix Outil | Backend and data science |
+| Aramis Sandoz | Backend and frontend |
+| Paul Metz | Frontend, UI, UX |
 
 We acknowledge the use of data from NASA's Fire Information for Resource Management System (FIRMS), part of NASA's Earth Science Data and Information System (ESDIS).
 
