@@ -6,6 +6,12 @@
 > Same Greek fires, same cleaning: stitching raw VIIRS onto MODIS makes 2012–2020 look **×6.02** more active.
 > That is a sensor artefact, not more fire. Vigil removes it.
 
+| Naive splice (raw VIIRS from 2012) | Vigil (harmonized) |
+|---|---|
+| ![Greece, raw naive 2012](docs/img/1794741293125_image.png) | ![Greece, harmonized](docs/img/1794741337406_image.png) |
+
+*Greece, Jul 2002 → Nov 2026, same cleaning and same colour scale. Left: the calendar darkens from 2012 because VIIRS sees more small fires. Right: VIGIL-K1 removes the jump, and the real big years (2007, 2021, 2023) stand out.*
+
 | | |
 |---|---|
 | **0.948** | R² of monthly anomalies, each year predicted by a model that never saw it (235 countries, 20,235 country-months) |
