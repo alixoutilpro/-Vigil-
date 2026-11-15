@@ -100,6 +100,12 @@ Every step counts what it removes (Greek funnel: `Donnees-propres/grece/entonnoi
 
 A hub is a place where real fire episodes recur. A hexagon-month is a "burst" when it reaches ≥ 4× its own median for that calendar month, so regular agricultural burning is removed by construction. Bursts are linked in space and time into episodes, then into hubs. Each hub gets a 1–100 score (frequency, magnitude, intensity) and a **bootstrap confidence** (500 resamples of the years). Face validity: the Greek hubs match the known fires (Attica 2009, Peloponnese 2007, Euboea 2021, Evros 2023) without the method knowing them.
 
+| Wildfire hubs, Greece 2003–2025 | Fire regime background |
+|---|---|
+| ![Vigil Trends, wildfire hubs in Greece](docs/img/trends_greece_hubs.jpg) | ![Vigil Trends, fire regimes in Greece](docs/img/trends_greece_fire_regime.jpg) |
+
+Together, these two views give a dynamic snapshot of the main wildfire hubs. They also make up for the imprecision of satellite detections: hotspots alone cannot tell a field being burned from a wildfire, but a recurring, seasonal signal (agricultural burning) and a rare, intense burst (a real wildfire) look very different once seen over 20+ years.
+
 ---
 
 ## Resources used
