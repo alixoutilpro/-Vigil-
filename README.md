@@ -216,6 +216,6 @@ Built by team **Vigil** for NASA Space Apps Challenge 2026, Paris.
 | Aramis Sandoz | Backend and frontend |
 | Paul Metz | Frontend, UI, UX |
 
-We acknowledge the use of data from NASA's Fire Information for Resource Management System (FIRMS), part of NASA's Earth Science Data and Information System (ESDIS).
+We used data from NASA's FIRMS, part of NASA's ESDIS.
 
 Main references: Giglio, Schroeder & Justice 2016 (*RSE* 178:31) · Schroeder et al. 2014 (*RSE* 143:85) · Fu et al. 2020 (*Remote Sensing* 12:2870) · Pettitt 1979 · Mann 1945 / Kendall 1975 · Iglewicz & Hoaglin 1993 · Vovk et al. 2005, Lei et al. 2018 (conformal prediction).
