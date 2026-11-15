@@ -4,7 +4,7 @@ import React, { useEffect, useRef } from "react";
 import type { Map as MLMap } from "maplibre-gl";
 
 /**
- * Decorative orbits (MODIS & VIIRS) drawn over the 3D globe while no region is selected.
+ * Decorative orbits (TERRA, NOAA-20, NOAA-21, SNPP) drawn over the 3D globe while no region is selected.
  *
  * - Pure SVG + native SMIL animation (animateMotion): no React re-render per frame, no WebGL work.
  * - The SVG is authored in a fixed space where the Earth is a circle of radius 100 at the origin;
@@ -21,8 +21,10 @@ const FADE_MS = 500;
 interface Orbit { id: string; label: string; rx: number; ry: number; tilt: number; dur: number; begin: number }
 
 const ORBITS: Orbit[] = [
-  { id: "modis", label: "MODIS", rx: 150, ry: 28, tilt: -8, dur: 26, begin: 0 },
-  { id: "viirs", label: "VIIRS", rx: 172, ry: 36, tilt: 10, dur: 34, begin: -13 },
+  { id: "terra",  label: "TERRA",   rx: 145, ry: 24, tilt: -14, dur: 34, begin:   0 },
+  { id: "noaa20", label: "NOAA-20", rx: 170, ry: 38, tilt:   6, dur: 50, begin: -11 },
+  { id: "snpp",   label: "SNPP",    rx: 158, ry: 46, tilt: -28, dur: 58, begin:  -5 },
+  { id: "noaa21", label: "NOAA-21", rx: 182, ry: 30, tilt:  22, dur: 42, begin: -18 },
 ];
 
 /* Ellipse as two arcs from the left end: first the near (lower) half, then the far (upper) half.
@@ -150,9 +152,6 @@ export default function OrbitOverlay(props: {
           <Defs />
           {ORBITS.map((o) => (
             <g key={o.id} transform={`rotate(${o.tilt})`}>
-              {/* far half: hidden where it crosses the Earth */}
-              <path d={farPath(o.rx, o.ry)} className="vo-orbit vo-orbit-far" mask="url(#vo-occlude)" />
-              <path d={nearPath(o.rx, o.ry)} className="vo-orbit vo-orbit-near" />
               <Satellite orbit={o} copy="far" />
               <Satellite orbit={o} copy="near" />
             </g>
@@ -179,7 +178,10 @@ function Satellite({ orbit: o, copy }: { orbit: Orbit; copy: "near" | "far" }) {
           <g>
             <animateTransform attributeName="transform" type="scale" values="0.9;1.06;0.9;0.74;0.9" keyTimes="0;0.25;0.5;0.75;1" calcMode="spline" keySplines={spline} {...timing} />
             <animate attributeName="opacity" values="0.95;1;0.95;0.7;0.95" keyTimes="0;0.25;0.5;0.75;1" calcMode="spline" keySplines={spline} {...timing} />
-            <use href="#vo-sat" />
+            <g>
+              <animateTransform attributeName="transform" type="rotate" values="0;22;0;-22;0" keyTimes="0;0.25;0.5;0.75;1" calcMode="spline" keySplines={spline} dur="13s" begin={`${o.begin}s`} repeatCount="indefinite" />
+              <use href="#vo-sat" />
+            </g>
           </g>
         </g>
         {/* Label: same motion without rotate, counter-rotated against the orbit tilt so it reads level. */}
