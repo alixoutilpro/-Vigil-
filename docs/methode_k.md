@@ -29,6 +29,9 @@
 - **Cible** : nombre **mensuel** de hotspots Aqua (unité du calendrier, exigence E5), jour + nuit.
 - **Prédicteur** : nombre de hotspots VIIRS (S-NPP ; NOAA-20 en test), mêmes jours, même zone.
 - **Données de calibration** : jours où **les deux** satellites observent. Les jours de panne (138 jours mesurés sur l'archive mondiale) et les jours **discordants** sont exclus. Un jour est discordant si l'écart robuste du log-rapport dépasse 3,5 (MAD, Iglewicz & Hoaglin 1993), soit 84 jours.
+  Médiane et MAD sont calculées **sur la fenêtre de calibration seulement** (correctif du 15/11, version mondiale) :
+  la distribution de référence est celle du régime calibré (Aqua dérive après 2020-11), et k ne bouge jamais quand des
+  données hors fenêtre changent (test `tests/test_calibration_fenetre.py`).
 - **Juge** : validation croisée **« une année laissée de côté »** (LOYO). On apprend sur toutes les années sauf une, on prédit l'année cachée, et on recommence pour chaque année.
 - **Références à battre** : la **prévision constante** (médiane climatologique du même mois) et **k = 1** (aucune harmonisation).
 - **Critère principal** : **déviance de Poisson**, la mesure adaptée à des comptages. La RMSE, qui élève les erreurs au carré, est dominée par les très gros mois ; la RMSE en log, par les très petits. Critères secondaires : biais total inférieur à 2 % (sinon les totaux annuels et les anomalies sont faussés), puis parcimonie (à performance indiscernable, on garde le modèle le plus simple ou le plus régularisé).

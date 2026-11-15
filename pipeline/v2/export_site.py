@@ -75,8 +75,8 @@ def harmoniser_hex(con, chemin_hex, Kc, rho_c, Kf, rho_f):
 
 def ecrire_gz(chemin, tableau):
     os.makedirs(os.path.dirname(chemin), exist_ok=True)
-    with gzip.open(chemin, "wb", compresslevel=9) as f:
-        f.write(tableau.tobytes())
+    with open(chemin, "wb") as f:   # mtime=0: identical bytes when the content is unchanged (no Git churn)
+        f.write(gzip.compress(tableau.tobytes(), compresslevel=9, mtime=0))
 
 
 def exporter_h3(dossier, site, memoire="3GB"):
@@ -178,7 +178,7 @@ def exporter_points_grece(sortie, site):
         ch = os.path.join(site, "points_grece", f"{a}.csv.gz")
         os.makedirs(os.path.dirname(ch), exist_ok=True)
         g.assign(acq_date=g["acq_date"].dt.strftime("%Y-%m-%d")).sort_values(["acq_date", "acq_time"]).to_csv(
-            ch, index=False, compression={"method": "gzip", "compresslevel": 9})
+            ch, index=False, compression={"method": "gzip", "compresslevel": 9, "mtime": 0})
         total += os.path.getsize(ch)
     return len(pts), total
 
@@ -200,6 +200,13 @@ def main(argv=None):
     c = pd.concat([par_pays.rename("hex"), carte.rename("carte")], axis=1).fillna(0)
     c = c[c.index.get_level_values("pays") != "inconnu"]      # the 0.25 deg map drops unknown-country rows
     ecart = float((c["hex"] - c["carte"]).abs().sum() / max(c["carte"].sum(), 1))
+    # closure: detections without a country (2026 form rows only) must stay a negligible share (audit 15/11)
+    pi = par_pays.groupby(level=["pays", "annee"]).sum()
+    inconnu = {"hotspots_sans_pays_par_annee": {int(y): round(float(v), 1) for (p, y), v in pi.items() if p == "inconnu"},
+               "part_2026_pct": round(100 * float(pi.get(("inconnu", 2026), 0.0)) / max(float(pi.xs(2026, level="annee").sum()), 1), 4)}
+    ap26 = os.path.join(dossier, "attribution_pays_2026.json")
+    if os.path.exists(ap26):
+        inconnu["attribution_2026"] = json.load(open(ap26, encoding="utf-8"))
 
     mois = sorted({f"{x}-{y:02d}" for x, y in zip(M["annee"], M["mois"])})
     index = {"genere_le": datetime.now().isoformat(timespec="seconds"), "methode": "VIGIL-K1 (comptes) + VIGIL-K1-FRP",
@@ -208,7 +215,7 @@ def main(argv=None):
              "bascule_viirs": str(BASCULE.date()), "provenance": {"avant_bascule": "modis_observed", "apres": "viirs_converted"},
              "mois": mois, "tuiles": sorted(tuiles), "seuils_couleur_quantiles": seuils,
              "validation": {"hotspots": rc["validation_mondiale"], "frp": rf["validation_mondiale"]},
-             "controle_hex_vs_carte_pays_ecart_relatif": ecart,
+             "controle_hex_vs_carte_pays_ecart_relatif": ecart, "controle_pays_inconnu": inconnu,
              "tailles_octets": {"h3_mois": tailles["mois"], "h3_tuiles": tailles["tuiles"], "pays_json": t_pays, "points_grece": t_pts},
              "points_grece": n_pts}
     with open(os.path.join(site, "index.json"), "w", encoding="utf-8") as f:
@@ -217,6 +224,7 @@ def main(argv=None):
     print(f"H3 5 : {len(mois)} mois -> {tailles['mois'] / mo:.1f} Mo ; {len(tuiles)} tuiles -> {tailles['tuiles'] / mo:.1f} Mo")
     print(f"pays.json : {t_pays / mo:.1f} Mo ; points Grece : {n_pts:,} points -> {t_pts / mo:.1f} Mo")
     print(f"Controle hexagones vs carte pays : ecart relatif {ecart:.2e} (attendu ~0)")
+    print(f"Controle pays inconnu : {inconnu['part_2026_pct']} % des hotspots harmonises 2026 (attendu ~0)")
     print(f"Fichiers ecrits dans {site}")
 
 

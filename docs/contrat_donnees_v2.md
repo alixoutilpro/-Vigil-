@@ -26,7 +26,8 @@ s'ajoute à l'historique Git (~100-200 Mo).
 ### `index.json` (au démarrage)
 `mois` (liste `"AAAA-MM"`), `tuiles` (liste des parents H3 res 1 disponibles), `h3_resolution` (5),
 `mois_index_0` (`"2002-01"`), `bascule_viirs`, `seuils_couleur_quantiles` (pour la légende),
-`validation` (chiffres de validation à montrer), `tailles_octets`.
+`validation` (chiffres de validation à montrer), `tailles_octets`, `controle_pays_inconnu` (hotspots sans pays par
+année, part en 2026, rapport d'attribution des pays 2026).
 
 ### `h3_5/mois/AAAA-MM.bin.gz` — la carte d'un mois
 Binaire **little-endian**, compressé gzip, enregistrements de **16 octets**, triés par `h3` :
@@ -54,6 +55,25 @@ Tous les mois des hexagones contenus dans un même hexagone **parent H3 de réso
 `{ "<Pays FIRMS>": { sous_region, fiabilite, fiabilite_frp, premier_mois, hotspots[], bas_80[], haut_80[], bas_95[], haut_95[], frp_MW[], frp_bas_80[], frp_haut_80[], couverture_jours[] } }`
 Tableaux alignés mois par mois à partir de `premier_mois`. Noms de pays = noms FIRMS (ex. `Democratic_Republic_of_the_Congo`).
 `fiabilite` ∈ `elevee | moyenne | faible` → **à afficher** (faible = peu de données, conversion moins sûre).
+
+**Pays des détections 2026.** Les fichiers 2026 (formulaire FIRMS « Monde ») n'indiquent pas le pays. Règle
+(`pipeline/v2/attribution_pays.py`) :
+1. point dans un polygone Natural Earth v5.1.2, chaque **partie** de polygone (continent, île, territoire d'outre-mer)
+   étant associée au nom de pays FIRMS majoritaire parmi ses détections MODIS 2023-2025 ; tolérance côtière 2 km ;
+2. sinon, pays de la même case de 0,25° dans les fichiers annuels FIRMS, puis pays majoritaire de l'hexagone H3 res 3 ;
+3. sinon `inconnu` (compté dans `index.json → controle_pays_inconnu`, jamais supprimé en silence).
+
+Validation (`etudes/attribution_pays_2026.py`) : la règle n'apprend que sur les années **antérieures** à l'année testée,
+puis on la compare au pays donné par FIRMS (détections MODIS végétation).
+
+| Détections attribuées au bon pays | 2021 (année record en Sibérie) | 2025 |
+|---|---|---|
+| Ancienne règle (case 0,25° vue les 3 années précédentes) | 95,2 % (Russie 73,0 %, Canada 68,6 %) | 96,5 % (Canada 61,5 %) |
+| Règle retenue | **99,94 %** (Russie 99,99 %, Canada 100 %) | **99,94 %** (Russie 99,97 %, Canada 100 %) |
+| Pire pays (≥ 300 détections) | Lesotho 98,0 % (ancienne règle : Gambie 60,8 %) | Gambie 98,3 % (ancienne : 65,2 %) |
+
+Avant ce correctif (audit du 15/11), les feux 2026 situés dans des cases sans feu en 2023-2025 étaient rangés en `inconnu`
+et absents de `pays.json`. Exemple : 79 % des détections S-NPP russes d'août 2026 et 56 % des canadiennes de juin-juillet.
 
 ### `incertitude.json` — fourchette d'une zone quelconque
 Pour un **total de zone** `x` d'un mois converti : classe `c` selon `classes_bornes`, puis
