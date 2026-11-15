@@ -1,4 +1,4 @@
-# Vigil, one fire calendar from 2002 to today, whatever the satellite
+# Vigil: how we fixed the 2012 jump in NASA fire maps
 
 **NASA Space Apps Challenge 2026 · Paris · Challenge: *Harmonization of MODIS and VIIRS Hot Spots***
 
