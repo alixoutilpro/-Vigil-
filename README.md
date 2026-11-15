@@ -4,9 +4,6 @@
 
 **Live app : [vigil-qarta.vercel.app](https://vigil-qarta.vercel.app)**
 
-> Same Greek fires, same cleaning: stitching raw VIIRS onto MODIS makes 2012–2020 look **×6.02** more active.
-> That is a sensor artefact, not more fire. Vigil removes it.
-
 | Naive splice (raw VIIRS from 2012) | Vigil (harmonized) |
 |---|---|
 | ![Greece, raw naive 2012](docs/img/1794741293125_image.png) | ![Greece, harmonized](docs/img/1794741337406_image.png) |
