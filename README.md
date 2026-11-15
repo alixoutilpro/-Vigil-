@@ -260,3 +260,27 @@ Built by team **Vigil** for NASA Space Apps Challenge 2026, Paris.
 We used data from NASA's FIRMS, part of NASA's ESDIS.
 
 Main references: Giglio, Schroeder & Justice 2016 (*RSE* 178:31) · Schroeder et al. 2014 (*RSE* 143:85) · Fu et al. 2020 (*Remote Sensing* 12:2870) · Pettitt 1979 · Mann 1945 / Kendall 1975 · Iglewicz & Hoaglin 1993 · Vovk et al. 2005, Lei et al. 2018 (conformal prediction).
+
+---
+
+## Deploy with Docker
+
+```bash
+# Build the image (on the target machine — ARM or x86)
+docker build -t vigil .
+
+# Run — map, globe and charts only (no weather)
+docker run -p 3000:3000 vigil
+
+# Run with weather (Meteomatics credentials passed at runtime — never baked into the image)
+docker run -p 3000:3000 -e MM_USER=xxx -e MM_PASS=xxx vigil
+
+# Different external port
+docker run -p 8080:3000 vigil
+```
+
+The image is built for the architecture of the machine running `docker build` (ARM64 on Apple Silicon, x86-64 on a typical server). Build on the target host — do not cross-compile unless you explicitly add `--platform`.
+
+In production, place a reverse proxy with HTTPS (Caddy or Nginx) in front of the container.
+
+**Without weather credentials** (`MM_USER` / `MM_PASS` absent): `/api/weather` returns HTTP 503 with a JSON error; the rest of the app (globe, map, hexagon explorer, charts) works normally.
