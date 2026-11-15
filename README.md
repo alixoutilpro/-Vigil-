@@ -2,7 +2,7 @@
 
 **NASA Space Apps Challenge 2026 · Paris · Challenge: *Harmonization of MODIS and VIIRS Hot Spots***
 
-**Live app → [vigil-qarta.vercel.app](https://vigil-qarta.vercel.app)**
+**Live app : [vigil-qarta.vercel.app](https://vigil-qarta.vercel.app)**
 
 > Same Greek fires, same cleaning: stitching raw VIIRS onto MODIS makes 2012–2020 look **×6.02** more active.
 > That is a sensor artefact, not more fire. Vigil removes it.
