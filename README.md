@@ -32,6 +32,10 @@ Vigil converts every VIIRS detection into a **MODIS-Aqua-equivalent** count, wit
 - **Country mode**: the validated country × month series (238 FIRMS countries and territories), with its reliability.
 - **Greece, fire by fire**: every satellite detection of the month on the map (MODIS / VIIRS / not counted). Hovering shows date, UTC time, satellite, FRP and confidence. The Greek calendar has **3 tabs**: *Raw · naive 2012*, *Raw · switch 2020*, *Harmonized*. All three use the same cleaning and colour scale, so the only difference you see is the effect of the harmonization.
 
+**Two interfaces** (selector at the top of the page): *Vigil Analytics*, described here, and *Vigil Trends*: wildfire hubs found by space-time clustering, each with an exposure score (1–100) and a bootstrap confidence (`docs/methode_tf.md`).
+
+**Map**: 3D globe by default; 2D in Gall-Peters (equal-area, so densities compare fairly across latitudes) or Mercator; colour-blind mode; a slider hides hexagons under a chosen density.
+
 **Analyst dashboard** (expand button of the analytics panel):
 - KPIs of the focus month: value and band, median, percentile range across the band, class.
 - Year to date, last 12 months, peak month and season, Sen trend with Mann–Kendall test, intensity (MW per detection).
@@ -63,15 +67,15 @@ Every step counts what it removes. The Greek funnel is in `Donnees-propres/grece
 | Choice | Decision | Evidence |
 |---|---|---|
 | Reference sensor | **MODIS Aqua** | The Terra/Aqua ratio drifts (Mann–Kendall p = 0.0003) |
-| Calibration window | **2012-02 → 2020-10** | Pettitt change point of the Aqua/S-NPP daytime ratio in 2020-11 (p = 0.006, regional study): Aqua orbit drift |
+| Calibration window | **2012-02 → 2020-10** | Pettitt change point of the Aqua/S-NPP daytime ratio in 2020-11 (p = 0.006, regional study): Aqua orbit drift. The same test on the pooled world ratio is not conclusive (p = 0.17) and is not used as evidence |
 | Published value | Aqua **observed** before 2020-11, VIIRS **converted** after | A valid observation is never replaced by an estimate |
 | Estimator | ratio of totals k = ΣAqua / ΣVIIRS (Poisson maximum likelihood) | Unbiased; mean or median of ratios are biased by −9 % to −60 % |
-| Stratification | country × day/night × calendar month, gamma–Poisson shrinkage toward the sub-region (α = 30, chosen by cross-validation) | Small countries borrow strength, large ones keep their own k |
+| Stratification | country × day/night × calendar month, gamma–Poisson shrinkage toward the sub-region (α = 30 for the world, chosen by cross-validation; the regional study of `docs/methode_k.md` found α = 10 on 5 countries) | Small countries borrow strength, large ones keep their own k |
 | NOAA-20 | chained to S-NPP (ρ = ΣS-NPP / ΣNOAA-20 per day/night × month, median ≈ 0.97); used on S-NPP outage days and after S-NPP's end (2 Nov 2026) | S-NPP and NOAA-20 are never summed (that would double-count fires) |
 | Uncertainty | split-conformal, Mondrian by size class, on log(1 + x) → 80 % and 95 % bands, never negative | Observed coverage 79.8 % (80 %) and 94.9 % (95 %) |
 | FRP | its own k (VIGIL-K1-FRP), same design | Reusing the count k for FRP would bias it by −75 % |
 
-### 2.3 Validation: leave-one-year-out, world, 226 countries, 19,965 country-months
+### 2.3 Validation: leave-one-year-out, world, 235 countries, 20,235 country-months
 
 Each year is predicted by a model that never saw it.
 
@@ -83,6 +87,8 @@ Each year is predicted by a model that never saw it.
 | Hotspots, 0.5° cells (~56 km) | 0.939 | 0.794 | 0.246 | +0.57 % | 0.38 |
 
 \* Anomalies = value minus the mean of the same month. This is the hard part: seasonality alone already gives a high plain R².
+
+Mean Poisson deviance 12.70; observed coverage of the bands 79.7 % (80 %) and 94.9 % (95 %).
 
 Country reliability shown in the app (235 calibrated countries): 127 high, 24 medium, 84 low.
 
@@ -116,7 +122,7 @@ Country reliability shown in the app (235 calibrated countries): 127 high, 24 me
 | Natural Earth v5.1.2 | admin-0 boundaries | sub-regions for k shrinkage |
 
 - **2000–2025**: FIRMS yearly country files.
-- **2026**: FIRMS archive download, world, through 2026-11-07; NRT rows after the archive end.
+- **2026**: FIRMS archive download, world, through 2026-11-07; NRT rows after the archive end. These files carry no country: it is assigned by `pipeline/v2/attribution_pays.py` (Natural Earth polygon, then cell history, then H3 parent), right for 99.94 % of detections on held-out years; 0.037 % of 2026 hotspots stay without a country and are counted in `index.json`.
 - Weather in the dashboard (optional): Meteomatics API, descriptive only. It needs `MM_USER` / `MM_PASS` as server environment variables, and the dashboard degrades cleanly without them.
 
 ---
@@ -134,6 +140,7 @@ Country reliability shown in the app (235 calibrated countries): 127 high, 24 me
    - For **MODIS** it catches only **43 %**. This affects only raw MODIS views of those months.
    - **November 2026 is partial** (until the 7th).
 6. **Industrial fires** (FIRMS type 2) are excluded, a team decision: Vigil tracks vegetation fires. Volcanoes and offshore flares are always excluded.
+   - FIRMS labels some fixed industrial sites as vegetation fires (type 0). Measured on Aqua 2010: 0.5 % of detections worldwide, but 52 % in Saudi Arabia, 22 % in Iran, 13 % in Italy, 8 % in France. Not corrected: read those countries with care.
 7. **A detection is not a fire**: one fire is seen by several passes and satellites. Totals are detections, MODIS-Aqua equivalent, and Σ FRP is a sum of instantaneous powers (MW), not an energy.
 8. **Border hexagons** can hold detections of two countries. In country mode the totals come from the country series, not from summing hexagons.
 9. **Point-level export (E9)** is available for Greece only. Elsewhere the export is the monthly zone series plus hexagon-months.
@@ -176,7 +183,7 @@ node scripts/test_stats.mjs --greece
 | `app/` | Web app: `Vigil.tsx` (map, panel), `DeepDive.tsx` (analyst dashboard), `zone.ts` / `stats.ts` (statistics), `donnees.ts` (data loaders) |
 | `pipeline/v2/` | Cleaning, aggregation, calibration (VIGIL-K1, K1-FRP), exports |
 | `etudes/` | Reproducible method studies (`etude_k.py`, sub-country validation) |
-| `docs/` | `methode_k.md` (k study), `contrat_donnees_v2.md` (data contract), `legende_carte.md` (colour classes) |
+| `docs/` | `methode_k.md` (k study), `contrat_donnees_v2.md` (data contract), `legende_carte.md` (colour classes), `methode_tf.md` (Vigil Trends: wildfire hubs) |
 | `tests/`, `scripts/` | Python tests, statistics tests (JS vs numpy) |
 | `public/data/` | Pre-computed static data served to the app (no raw data, no keys) |
 
