@@ -208,8 +208,8 @@ export interface Hub {
 }
 export interface HubsTF {
   genere_le: string; annees: [number, number];
-  parametres: { v_min: number; ratio: number; episode_min: number; hex_min: number; hub_min: number; taille_max: number; n_boot: number };
-  resume: { hexagones_mois: number; sursauts: number; episodes: number; hubs: number; part_detections_episodiques: number; confiance_mediane: number; hubs_confiance_90: number; taille_mediane_hexagones: number; annees_episode_mediane: number };
+  parametres: { v_min: number; ratio: number; episode_min: number; hex_min: number; hub_min: number; taille_max: number; n_boot: number; normalisation_latitude?: boolean; lat_ref?: number; exclusion_sites_fixes?: boolean };
+  resume: { hexagones_mois: number; sursauts: number; sursauts_bruts?: number; sursauts_en_episode?: number; hexagones_exclus?: number; part_detections_exclues?: number; hubs_confiance_95?: number; episodes: number; hubs: number; part_detections_episodiques: number; confiance_mediane: number; hubs_confiance_90: number; taille_mediane_hexagones: number; annees_episode_mediane: number };
   hubs: Hub[];
 }
 export const chargerHubs = () => chargerJSON<HubsTF>("tf/hubs.json");

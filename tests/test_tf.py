@@ -155,3 +155,17 @@ def test_hubs_bursts_episodes_and_split():
     gros = pd.Series(np.arange(1.0, 62.0), index=np.array([h3.str_to_int(c) for c in h3.grid_disk(h3.latlng_to_cell(38.1, 23.8, 5), 4)], np.uint64))
     hub = decouper(gros)
     assert hub.groupby(hub).size().max() <= TAILLE_MAX and gros.idxmax() in hub.index      # local hubs, the strongest hexagon kept
+
+
+def test_hubs_latitude_weight_and_fixed_sites(tmp_path):
+    """Same counts weigh less at high latitude (more overpasses); the published exclusion list is readable and holds known volcanoes."""
+    from pipeline.tf.hubs import LAT_REF, poids_latitude
+    from pipeline.tf.sites_fixes import charger
+    eq, ref, nord = (h3.str_to_int(h3.latlng_to_cell(la, 20.0, 5)) for la in (0.0, LAT_REF, 60.0))
+    w = poids_latitude([eq, ref, nord])
+    assert w[ref] == pytest.approx(1.0, abs=0.01) and w[eq] > 1.25 and w[nord] == pytest.approx(0.5 / np.cos(np.radians(LAT_REF)), abs=0.02)
+    exclus, t = charger()
+    assert t is not None and set(t["raison"]) == {"volcan", "firms_statique"}
+    for la, lo in ((19.41, -155.28), (-1.52, 29.25), (-21.24, 55.71)):          # Kilauea, Nyiragongo, Piton de la Fournaise
+        assert h3.str_to_int(h3.latlng_to_cell(la, lo, 5)) in exclus
+    assert h3.str_to_int(h3.latlng_to_cell(41.004, 25.998, 5)) not in exclus    # Evros 2023: a real wildfire stays

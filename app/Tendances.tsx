@@ -140,11 +140,12 @@ export default function Tendances() {
   const rows = useMemo(() => (cellule !== null ? [cellule] : zoneRows), [cellule, zoneRows]);
   const serie: SerieTF | null = useMemo(() => (t && rows ? serieZone(t, rows, modele) : null), [t, rows, modele]);
   const hubParId = useMemo(() => new Map((hubs?.hubs ?? []).map((h) => [h.id, h])), [hubs]);
+  /** Every hub of the zone, before the confidence filter of the map. */
+  const hubsZone = useMemo(() => (!hubs ? [] as Hub[] : selection ? hubsDeZone(hubs.hubs, selection.region.bbox, selection.ring, selection.region.pays) : hubs.hubs), [hubs, selection]);
   const hubsVisibles = useMemo(() => {
     if (!hubs) return [] as Hub[];
-    const base = selection ? hubsDeZone(hubs.hubs, selection.region.bbox, selection.ring, selection.region.pays) : hubs.hubs;
-    return base.filter((h) => h.confiance >= confMin);
-  }, [hubs, selection, confMin]);
+    return hubsZone.filter((h) => h.confiance >= confMin);
+  }, [hubs, hubsZone, confMin]);
   const hub = hubSel !== null ? hubParId.get(hubSel) ?? null : null;
 
   /* ── Map features ── */
@@ -742,7 +743,7 @@ export default function Tendances() {
             </div>
           </div>
           <div className="hd-split-body"><section className="hd-split-pane hd-dash-pane hd-glass" aria-label="Vigil Trends dashboard">
-            <TendancesDive hubs={hubs} liste={classement} modele={modele} titre={selectionName || "World"} onHub={(id) => { setSplit(false); ouvrirHub(id, true); }} />
+            <TendancesDive hubs={hubs} liste={classement} tous={hubsZone} modele={modele} titre={selectionName || "World"} onHub={(id) => { setSplit(false); ouvrirHub(id, true); }} />
           </section></div>
         </div>
       )}

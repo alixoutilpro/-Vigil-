@@ -20,11 +20,11 @@ const fp = (p: number) => (p < 0.001 ? "<0.001" : p.toFixed(3));
 const tip: React.CSSProperties = { fontSize: 11, background: "#fff", border: "1px solid #e2e8f0", color: "#0f172a", borderRadius: 6, padding: "6px 9px" };
 type Tri = "score" | "confiance" | "annees_episode" | "detections" | "dernier";
 
-export default function TendancesDive({ hubs, liste, modele, titre, onHub }: { hubs: HubsTF; liste: Hub[]; modele: ModeleTF | null; titre: string; onHub: (id: number) => void }) {
+export default function TendancesDive({ hubs, liste, tous, modele, titre, onHub }: { hubs: HubsTF; liste: Hub[]; tous: Hub[]; modele: ModeleTF | null; titre: string; onHub: (id: number) => void }) {
   const [tri, setTri] = useState<Tri>("score");
   const P = hubs.parametres, R = hubs.resume, NY = hubs.annees[1] - hubs.annees[0] + 1;
   const lignes = useMemo(() => liste.slice().sort((a, b) => (tri === "dernier" ? b.dernier.localeCompare(a.dernier) : (b[tri] as number) - (a[tri] as number))).slice(0, 300), [liste, tri]);
-  const conf90 = liste.filter((h) => h.confiance >= 0.9).length;
+  const conf90 = tous.filter((h) => h.confiance >= 0.9).length;   // counted on every hub of the zone, whatever the map filter
   const recents = liste.filter((h) => Number(h.dernier.slice(0, 4)) >= hubs.annees[1] - 4).length;
   const TL = modele?.tendances_locales_lissees ?? modele?.tendances;
   const trajData = modele ? modele.trajectoires.annees.map((y, i) => ({ y, ...Object.fromEntries(modele.trajectoires.centres.map((c) => [`t${c.trajectoire}`, c.valeurs[i]])) })) : [];
@@ -40,11 +40,11 @@ export default function TendancesDive({ hubs, liste, modele, titre, onHub }: { h
       </div></header>
 
       <div className="dd-kpis">
-        <Kpi l={`Hubs · ${titre}`} v={n0(liste.length)} s={`${n0(conf90)} with confidence ≥ 90 % · ${n0(recents)} with an episode since ${hubs.annees[1] - 4}`}
+        <Kpi l={`Hubs · ${titre}`} v={n0(liste.length)} s={`${liste.length < tous.length ? `of ${n0(tous.length)} before the confidence filter · ` : ""}${n0(conf90)} with confidence ≥ 90 % · ${n0(recents)} with an episode since ${hubs.annees[1] - 4}`}
           d="Number of wildfire hubs whose centre lies in the zone (after the confidence filter of the map). Confidence ≥ 90 %: hubs whose detection does not depend on any single year." />
         <Kpi l="Highest exposure" v={liste[0] ? `${liste[0].score} / 100` : "—"} s={liste[0] ? `${fmtLat(liste[0].lat)} ${fmtLon(liste[0].lon)} · ${liste[0].annees_episode} years with an episode · confidence ${p0(liste[0].confiance)}` : "no hub in the zone"}
           d="Exposure score = percentile rank, among all hubs worldwide, of the mean of three percentile ranks: how often (share of years with an episode), how much (episode detections per 1,000 km² per year) and how intense (FRP per detection). 100 = the most exposed hubs on Earth. It ranks places; it is not a probability." />
-        <Kpi l="Episodes found · world" v={n0(R.episodes)} s={`${n0(R.sursauts)} bursts among ${n0(R.hexagones_mois)} hexagon-months with fire`}
+        <Kpi l="Episodes found · world" v={n0(R.episodes)} s={`${n0(R.sursauts_en_episode ?? R.sursauts)} bursts kept in an episode${R.sursauts_bruts ? `, of ${n0(R.sursauts_bruts)} raw bursts` : ""} · ${n0(R.hexagones_mois)} hexagon-months with fire, ${hubs.annees[0]}–${hubs.annees[1]}`}
           d={`An episode is a connected group of bursts: same or neighbouring hexagons, same or consecutive months. Episodes under ${P.episode_min} detections are dropped.`} />
         <Kpi l="Share of detections in episodes" v={p0(R.part_detections_episodiques, 1)} s="the rest is recurrent burning, set aside on purpose"
           d="Share of all harmonized detections 2003–2025 that belongs to an episode of a hub. The large remainder is the regular, seasonal burning (savannas, crop residues) that fills the Analytics map but says little about wildfire exposure." />
@@ -87,13 +87,14 @@ export default function TendancesDive({ hubs, liste, modele, titre, onHub }: { h
         <section className="dd-panel dd-full" aria-label="Method">
           <div className="dd-sec-head"><span className="dd-sec-title">How a hub is found · space-time clustering</span></div>
           <ol className="td-steps">
+            <li><b>Before anything.</b> {n0(R.hexagones_exclus ?? 0)} hexagons are left out ({((R.part_detections_exclues ?? 0) * 100).toFixed(2)} % of detections): those dominated by sites that FIRMS itself labels as static (flares, industry), and those within ~17 km of a volcano that erupted since 1990 (Smithsonian GVP). Lava and gas flares are hot, not burning vegetation. Absolute thresholds use detections × cos(latitude) / cos({P.lat_ref ?? 40}°): polar-orbiting satellites pass about twice as often at 60° as at the equator, which would otherwise favour boreal hubs. The numbers displayed stay the real counts.</li>
             <li><b>Burst.</b> A hexagon-month is a burst when its detections are large (≥ {P.v_min}) <i>and</i> unusual for that hexagon and that calendar month: ≥ {P.ratio} × (median of the same month over all years + 1). A field burnt every March has a high March median: it never bursts. This is where time separates wildfires from recurrent burning.</li>
             <li><b>Episode.</b> Bursts are linked when their hexagons are identical or neighbours and their months identical or consecutive; each connected group is one episode. Episodes under {P.episode_min} detections are dropped.</li>
             <li><b>Hub.</b> Hexagons with ≥ {P.hex_min} episode detections are grouped with their neighbours; a group larger than {P.taille_max} hexagons is cut down to its most exposed half, repeatedly. Hubs under {P.hub_min} detections are dropped.</li>
             <li><b>Score.</b> Three measures, each turned into a percentile rank among all hubs: share of years with an episode, episode detections per 1,000 km² per year, FRP per detection. The score is the percentile rank of their mean: 1 to 100.</li>
             <li><b>Confidence.</b> Bootstrap over years ({P.n_boot} resamples): the share of resamples in which the hub still passes step 3.</li>
           </ol>
-          <p className="dd-note">Limits. A detection is not a fire, and a ~17 km hexagon-month cannot tell one large fire from several close ones. Thresholds are choices, written in <code>pipeline/tf/hubs.py</code>; the list of hubs changes at the margin when they move, the highest scores do not. The score compares hubs with each other: it is an exposure ranking built on 23 years of record, not a forecast. Intense recurrent burning that shifts from its usual month can enter as a burst.</p>
+          <p className="dd-note">Limits. A detection is not a fire, and a ~17 km hexagon-month cannot tell one large fire from several close ones. Thresholds are choices, written in <code>pipeline/tf/hubs.py</code>; the list of hubs changes at the margin when they move, the highest scores do not. The score compares hubs with each other: it is an exposure ranking built on 23 years of record, not a forecast. Intense recurrent burning that shifts from its usual month can enter as a burst. <b>Sensor check</b>: on 2013–2019, the same detection run on MODIS Aqua and on converted VIIRS finds 73 % of the Aqua hubs within one hexagon (85 % the other way), but the exact hexagons overlap by only 44 %: after November 2020 (converted VIIRS), a hub is reliable as a place, not hexagon by hexagon, and episodes before and after 2020 are not strictly comparable. Lava far from a summit (Kilauea rift zone) and untyped flares can still appear, with a low score or confidence.</p>
         </section>
 
         {modele && (

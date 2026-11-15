@@ -34,36 +34,62 @@ sursaut. Le brûlage régulier est retiré par construction, sans carte d'occupa
 Lecture de la confiance : un hub qui repose sur une seule année exceptionnelle est retrouvé dans ~64 % des tirages
 (1 − (22/23)²³). C'est un vrai feu, mais sa récurrence n'est pas démontrée.
 
-### Résultats ✅ (exécution du 15/11, `public/data/tf/hubs.json`)
+### Résultats ✅ (exécution du 15/11 après l'audit qualité, `public/data/tf/hubs.json`)
 
-| | Monde |
+| | Monde, 2003-2025 |
 |---|---|
-| Hexagones-mois avec feu | 13 491 949 |
-| Sursauts retenus dans un épisode | 344 033 |
-| Épisodes ≥ 50 détections | 34 511 (médiane : 4 hexagones, 2 mois) |
-| Hubs | 6 438 (médiane : 3 hexagones, 4 années avec épisode) |
-| Part des détections 2003-2025 dans un épisode de hub | 6,8 % |
-| Confiance médiane | 87,6 % ; 2 951 hubs ≥ 90 % |
+| Hexagones-mois avec feu | 12 271 971 |
+| Hexagones exclus (sites fixes, volcans) | 5 368, soit 0,50 % des détections |
+| Sursauts bruts | 503 179 |
+| Sursauts retenus dans un épisode | 349 881, dans 36 004 épisodes |
+| Hubs | 6 512 (4 240 sous 30° de latitude, 626 entre 30° et 45°, 1 646 au-delà) |
+| Hubs de confiance ≥ 95 % | 2 685 |
 
-**Validité de face sur la Grèce** ✅ : les 8 hubs grecs correspondent aux épisodes connus, sans que la méthode les connaisse.
+**Validité de face sur la Grèce** ✅ : 9 hubs, dont l'Attique (score 62), Rhodes 2008, le Péloponnèse 2007 (deux hubs),
+l'Evros 2023, l'Eubée 2021 et Chios 2012, sans que la méthode connaisse ces événements.
 
-| Hub (centre) | Score | Confiance | Années | Plus gros épisode | Événement connu |
-|---|---|---|---|---|---|
-| 38,2°N 23,8°E | 71 | 100 % | 5 | août 2009 · 166 | Attique |
-| 41,0°N 26,0°E | 53 | 72 % | 2 | août 2023 · 587 | Evros |
-| 36,1°N 27,9°E | 52 | 57 % | 2 | juil. 2008 · 95 | Rhodes |
-| 37,4°N 22,0°E | 43 | 74 % | 2 | août 2007 · 971 | Péloponnèse |
-| 38,9°N 23,3°E | 39 | 62 % | 1 | août 2021 · 382 | Eubée |
-| 38,3°N 26,0°E | 32 | 67 % | 2 | août 2012 · 107 | Chios |
+### Corrections issues de l'audit qualité du 15/11
+
+| Constat de l'audit | Correction | Effet mesuré |
+|---|---|---|
+| Volcans et torchères comptés comme feux | `pipeline/tf/sites_fixes.py` : hexagones dominés par des sites que FIRMS étiquette lui-même statiques (≥ 30 détections et ≥ 50 % des détections VIIRS 2023-2025), et hexagones à moins de ~17 km d'un volcan en éruption depuis 1990 (Smithsonian GVP). Liste publiée : `pipeline/tf/sites_fixes_h3.csv` | Hubs du Nyiragongo (83), de la Fournaise (78), de Hassi Messaoud (21) et de Samotlor (17) supprimés ; 🟡 Kilauea : il reste un hub sur la zone de rift, score 49, confiance 68 % (lave à plus de 17 km du sommet) |
+| Biais de latitude | Seuils absolus et densité du score calculés sur détections × cos(latitude) / cos(40°) : un satellite polaire repasse ~1/cos(latitude) fois plus souvent. La loi en 1/cos reproduit à 5 % près la simulation d'orbites de l'audit jusqu'à 60° ; elle est plafonnée à 70° | Hubs au-delà de 45° : 2 271 → 1 646 (−28 %) ; sous 30° : 3 497 → 4 240. Canada : 326 hubs au lieu de 451, 95 % des détections d'épisode de 2023 conservées |
+| Médiane incluant 2002 et 2026 partiels | Toute la détection se fait sur les années complètes 2003-2025 | — |
+| « Sursauts » mal libellé | `sursauts_bruts` et `sursauts_en_episode` dans le résumé et l'interface | — |
+| Compte « ≥ 90 % » sur une liste déjà filtrée | Compté sur tous les hubs de la zone | — |
+
+Le choix de 40° comme latitude de référence ne change aucun classement, seulement le niveau des seuils : c'est la latitude
+où la méthode a été confrontée à des feux documentés (Grèce).
+
+### Le capteur change-t-il les hubs ? 🟡 (`etudes/validation_hubs_capteur.py`)
+
+Sur 2013-2019, les deux capteurs observent tous les mois. La même détection est lancée sur Aqua observé, puis sur S-NPP × k
+(la conversion appliquée depuis nov. 2020), mêmes exclusions, mêmes seuils.
+
+| | Aqua observé | S-NPP converti |
+|---|---|---|
+| Total de détections | 18,98 M | 19,06 M (+0,4 %) |
+| Hexagones-mois avec feu | 2,96 M | 6,35 M (dont 62 % sous une détection) |
+| Hubs | 2 920 | 2 406 |
+
+- Hubs Aqua retrouvés par S-NPP à un hexagone près : **73 %** ; dans l'autre sens : **85 %**.
+- Recouvrement exact des hexagones de hub (Jaccard) : **0,44** ; à la résolution 4 (~42 km) : 0,56.
+
+Conclusion honnête : la conversion est juste en total, mais elle garde la répartition spatiale de VIIRS, plus étalée.
+Un hub est fiable **comme lieu**, pas hexagone par hexagone, et les épisodes d'avant et d'après 2020 ne sont pas strictement
+comparables. Environ un quart des hubs dépend du capteur.
 
 ### Limites
 
+0. 🟡 **Dépendance au capteur** : voir ci-dessus (Jaccard 0,44 à l'hexagone). Non corrigé ; piste : détecter à la résolution 4.
 1. ⚠️ **Sensibilité aux seuils non mesurée.** Les 6 constantes sont des choix raisonnés, pas optimisés. À faire : refaire tourner avec `RATIO` 3 et 6, `V_MIN` 5 et 20, et mesurer le recouvrement des hubs.
 2. Une détection n'est pas un feu ; un hexagone-mois de ~17 km ne sépare pas un grand feu de plusieurs feux proches.
 3. Un brûlage récurrent qui se décale de son mois habituel peut entrer comme sursaut.
 4. Le score **classe** les hubs entre eux sur 23 ans d'historique. Ce n'est ni une probabilité ni une prévision.
 5. Les mois convertis (depuis nov. 2020) portent l'incertitude de VIGIL-K1, non propagée dans le score.
-6. Les défauts connus des données sources s'appliquent (août 2020 sous-estimé par la panne d'Aqua ; correctif en cours).
+6. Les défauts connus des données sources s'appliquent (août 2020 sous-estimé par la panne d'Aqua, non corrigé).
+7. Les exclusions ne concernent que Vigil Trends : les cartes Analytics montrent encore volcans et torchères non étiquetés par FIRMS (les retirer impose de réagréger les fichiers bruts).
+8. ⚠️ Non traité : validation hors échantillon élargie des fourchettes de VIGIL-K1 (la couverture publiée est déjà calculée année par année, quantiles appris sans l'année testée, `mondial_calibration.py`) ; noms de pays différents entre `hubs.json` (Natural Earth) et `pays.json` (FIRMS) ; couverture du mois partiel dans `pays.json`.
 
 ## 3. Couches de contexte — `pipeline/tf/regimes.py`, `executer.py`
 
@@ -104,6 +130,7 @@ python -m pip install -r requirements.txt -r requirements-tf.txt
 python -m pipeline.tf.table        # historique par territoire, depuis public/data
 python -m pipeline.tf.statique     # occupation du sol + relief
 python -m pipeline.tf.climat       # normales TerraClimate
+python -m pipeline.tf.sites_fixes --volcans <csv GVP>   # liste d'exclusion (déjà dans le dépôt)
 python -m pipeline.tf.hubs         # foyers -> public/data/tf/hubs.json
 python -m pipeline.tf.executer     # régimes, tendances, trajectoires -> public/data/tf/
 python -m pytest
