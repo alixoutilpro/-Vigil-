@@ -1,5 +1,5 @@
 {
- "genere_le": "2026-11-15T02:43:25",
+ "genere_le": "2026-11-15T14:55:50",
  "methode": "VIGIL-K1 (comptes) + VIGIL-K1-FRP",
  "unites": {
   "hotspots": "detections de feux actifs, equivalent MODIS Aqua",
@@ -782,59 +782,59 @@
   "hotspots": {
    "0.5": 2.0,
    "0.75": 5.0,
-   "0.9": 13.214718437194904,
-   "0.95": 22.0,
+   "0.9": 13.231775283813477,
+   "0.95": 22.059343338012685,
    "0.99": 47.0
   },
   "frp_MW": {
-   "0.5": 35.0,
-   "0.75": 153.10000610351562,
-   "0.9": 540.7000122070312,
-   "0.95": 1056.300048828125,
-   "0.99": 3241.27536621096
+   "0.5": 34.900001525878906,
+   "0.75": 152.89999389648438,
+   "0.9": 540.7974426269536,
+   "0.95": 1056.5999755859375,
+   "0.99": 3241.699951171875
   }
  },
  "validation": {
   "hotspots": {
-   "n_mois": 20235,
-   "aqua_total": 23972086.0,
-   "r2": 0.9962001932489982,
-   "biais_pct": -0.03033467518200154,
-   "deviance_poisson": 12.704607371898259
+   "n_mois": 20225,
+   "aqua_total": 23935490.0,
+   "r2": 0.9962778104029233,
+   "biais_pct": -0.03019861480546388,
+   "deviance_poisson": 12.46656813235399
   },
   "frp": {
    "vigil_k1_frp": {
-    "rmse_MW": 27071.54908171672,
-    "rmse_sur_ecart_type": 0.09456304237459091,
-    "r2": 0.9910573748070259,
-    "r2_anomalies": 0.940098944344279,
-    "biais_pct": -0.26036239709435777,
-    "erreur_relative_mediane_pct_mois_1000MW_plus": 13.396993231468402
+    "rmse_MW": 26930.904999561586,
+    "rmse_sur_ecart_type": 0.09424633017526317,
+    "r2": 0.9911171758812662,
+    "r2_anomalies": 0.9406278358061576,
+    "biais_pct": -0.25932763819182536,
+    "erreur_relative_mediane_pct_mois_1000MW_plus": 13.331391696070805
    },
    "naif_A_ratio_global": {
-    "rmse_MW": 51406.28045138525,
-    "rmse_sur_ecart_type": 0.1795661660132891,
-    "r2": 0.9677543470047696,
-    "r2_anomalies": 0.7840065290626382,
-    "biais_pct": -0.0064609417318407004,
-    "erreur_relative_mediane_pct_mois_1000MW_plus": 32.61698026712983,
-    "skill_vigil_vs_ce_naif": 0.72267191505482
+    "rmse_MW": 51400.79889369804,
+    "rmse_sur_ecart_type": 0.17988020320470588,
+    "r2": 0.9676414609593301,
+    "r2_anomalies": 0.783717828101118,
+    "biais_pct": -0.005119855905447837,
+    "erreur_relative_mediane_pct_mois_1000MW_plus": 32.539523793692396,
+    "skill_vigil_vs_ce_naif": 0.7254874792842353
    },
    "naif_B_k_des_comptes": {
-    "rmse_MW": 221378.09064021392,
-    "rmse_sur_ecart_type": 0.7732910186567371,
-    "r2": 0.4019904928887055,
-    "r2_anomalies": -3.0056918404975423,
-    "biais_pct": -74.68629473355314,
-    "erreur_relative_mediane_pct_mois_1000MW_plus": 71.58574172913725,
-    "skill_vigil_vs_ce_naif": 0.9850460150104106
+    "rmse_MW": 220936.26213554153,
+    "rmse_sur_ecart_type": 0.7731798062209092,
+    "r2": 0.40216247444019515,
+    "r2_anomalies": -2.9959034710502555,
+    "biais_pct": -74.68249566173118,
+    "erreur_relative_mediane_pct_mois_1000MW_plus": 71.60638047200108,
+    "skill_vigil_vs_ce_naif": 0.9851417421306633
    }
   }
  },
- "controle_hex_vs_carte_pays_ecart_relatif": 3.657916514492261e-08,
+ "controle_hex_vs_carte_pays_ecart_relatif": 3.650833466278322e-08,
  "controle_pays_inconnu": {
   "hotspots_sans_pays_par_annee": {
-   "2026": 803.4
+   "2026": 803.9
   },
   "part_2026_pct": 0.0372,
   "attribution_2026": {
@@ -857,9 +857,9 @@
   }
  },
  "tailles_octets": {
-  "h3_mois": 94391841,
-  "h3_tuiles": 97166161,
-  "pays_json": 3300267,
+  "h3_mois": 94854933,
+  "h3_tuiles": 97657994,
+  "pays_json": 3307023,
   "points_grece": 2460685
  },
  "points_grece": 194428
