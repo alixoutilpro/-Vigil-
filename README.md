@@ -141,7 +141,7 @@ A hub is a place where real fire episodes recur. A hexagon-month is a "burst" wh
 
 1. **Stationarity**: the VIIRS ↔ pre-drift Aqua relation is assumed to hold after 2020. It is supported by NOAA-20/S-NPP stability, but it cannot be checked against a stable MODIS.
 2. **Below country scale**, precision drops (anomaly R² ≈ 0.8, median error ≈ 16 %). Low-reliability countries have wide bands.
-3. **Coverage**: 238 FIRMS countries and territories are shown; 235 have their own calibration, the others use the shared day/night × month k.
+3. **Coverage**: 235 calibrated countries, each with its reliability level shown in the app.
 4. **2026 near-real-time rows** have no FIRMS `type`: industrial sites are removed with a persistence mask (see above). November 2026 is partial (until the 7th).
 5. **Industrial fires are excluded** (Vigil tracks vegetation fires), but FIRMS labels some fixed sites as vegetation (52 % of detections in Saudi Arabia, 8 % in France on Aqua 2010). Not corrected.
 6. **A detection is not a fire**: totals are MODIS-Aqua-equivalent detections, and Σ FRP is a sum of instantaneous powers (MW), not an energy.
