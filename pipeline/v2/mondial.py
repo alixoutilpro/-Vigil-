@@ -10,8 +10,9 @@ agreger reads the FIRMS yearly country files once (DuckDB, memory-limited) and w
     cellule/<dir>_<year>.parquet country x 0.25 deg cell x month x satellite x day/night x "day without S-NPP"
                                  (outage or after 2026-11-02: NOAA-20 replaces S-NPP on those days only)
     statique/<dir>_<year>.parquet 0.02 deg cells with their FIRMS 'type' counts (2023-2025 only, static mask)
-The 2026 "World" form files get their country from the historical 0.25 deg cell -> country table and,
-for NRT rows (no 'type'), the static-site mask validated on 2025.
+The 2026 "World" form files carry no country: it is given by pipeline/v2/attribution_pays.py (Natural Earth
+polygon part -> FIRMS name learnt on the 2023-2025 MODIS files, else 0.25 deg cell history, else H3 res-3 parent;
+rule chosen and validated in etudes/attribution_pays_2026.py). NRT rows (no 'type') get the static-site mask validated on 2025.
 
 Simplifications versus the Greece pipeline (measured there, documented in docs/methode_k.md):
 near-duplicates are not removed (effect on k < 1 %); FIRMS country files define the country.
@@ -28,6 +29,7 @@ import pandas as pd
 import shapely
 from shapely.geometry import shape
 
+from . import attribution_pays as A
 from . import parametres as P
 from .harmonisation import ALPHA, BASCULE, CLASSES, DEBUT_CALIB, FIN_CALIB, NIVEAU, NOMS_CLASSES
 
@@ -36,6 +38,7 @@ CELLULE_MASQUE = 0.02  # degrees (~2 km), static-site mask grid
 H3_MONDE = 5           # H3 resolution of the global hexagon map (~253 km2); DuckDB 'h3' community extension
 TABLES_HISTORIQUES = frozenset({"jour", "cellule", "statique"})   # written together (default, as before)
 TABLES_H3_FRP = frozenset({"hex", "jourfrp"})                     # second pass: H3 map + FRP calibration input
+ANNEES_CORRESPONDANCE = [2023, 2024, 2025]   # MODIS yearly files used to map Natural Earth parts -> FIRMS names
 SAT_SQL = """CASE upper(trim(satellite))
     WHEN 'TERRA' THEN 'Terra' WHEN 'T' THEN 'Terra' WHEN 'AQUA' THEN 'Aqua' WHEN 'A' THEN 'Aqua'
     WHEN 'N' THEN 'SNPP' WHEN 'SNPP' THEN 'SNPP' WHEN 'N20' THEN 'NOAA20' WHEN '1' THEN 'NOAA20'
@@ -118,6 +121,40 @@ def masque(sortie, annees_apprentissage, dilatation=1):
     return s[["ilat", "ilon"]].drop_duplicates()
 
 
+def table_pays_2026(con, a, form, sortie, pays_sql):
+    """0.01 deg cells (i, j) of the 2026 form rows -> FIRMS country, with a written report (no silent 'inconnu')."""
+    from .nettoyage import sha256
+    if sha256(a.frontieres) != P.SHA256_FRONTIERES:
+        raise SystemExit(f"Empreinte inattendue pour {a.frontieres} : retelechargez {P.URL_FRONTIERES}")
+    parties = A.charger_parties(a.frontieres)
+    f = [x for y in ANNEES_CORRESPONDANCE for x in glob.glob(os.path.join(a.brut, "modis", str(y), "*.csv"))]
+    hist = con.sql(f"""SELECT {pays_sql} AS pays, floor(latitude::DOUBLE / {A.PAS})::BIGINT i,
+            floor(longitude::DOUBLE / {A.PAS})::BIGINT j, count(*) n
+        FROM read_csv({_liste(f)}, union_by_name=true, all_varchar=true, filename=true)
+        WHERE TRY_CAST(confidence AS INT) >= 30 AND "type" = '0' GROUP BY ALL""").df()
+    corr, qualite = A.apprendre_correspondance((hist["i"] + 0.5) * A.PAS, (hist["j"] + 0.5) * A.PAS, hist["pays"].to_numpy(object),
+                                               hist["n"].to_numpy(float), parties, P.TOLERANCE_COTE_KM)
+    qualite.to_csv(os.path.join(sortie, "correspondance_ne_firms.csv"), index_label="partie")
+    cel = con.sql(f"""SELECT floor(lat / {A.PAS})::BIGINT i, floor(lon / {A.PAS})::BIGINT j, count(*) n
+                      FROM ({_brut(form, "'?'")}) WHERE valide GROUP BY ALL""").df()
+    ref_cel = os.path.join(sortie, "cellule", "*_[0-9][0-9][0-9][0-9].parquet").replace("\\", "/")
+    ref_sql = f"""SELECT pays, lat_c, lon_c, sum(n_vegetation) n FROM read_parquet('{ref_cel}')
+                  WHERE satellite IN ('Aqua','SNPP','NOAA20') AND n_vegetation > 0 AND pays <> 'inconnu'
+                    AND annee < 2026 GROUP BY ALL"""   # yearly files only: 'formulaire_2026' also matches the glob
+    pays, niveau = A.attribuer(con, ((cel["i"] + 0.5) * A.PAS).to_numpy(), ((cel["j"] + 0.5) * A.PAS).to_numpy(),
+                               parties, corr, ref_sql, P.TOLERANCE_COTE_KM)
+    cel["pays"], cel["niveau"] = pays, niveau
+    w = cel.groupby("niveau")["n"].sum()
+    rapport = {"regle": "pipeline/v2/attribution_pays.py (validation : etudes/attribution_pays_2026.py)",
+               "lignes_valides": int(cel["n"].sum()), "cellules_0.01": int(len(cel)),
+               "niveau_pct_lignes": {k: round(100 * float(v) / float(w.sum()), 4) for k, v in w.items()},
+               "parties_natural_earth_associees": int(len(corr)), "annees_correspondance": ANNEES_CORRESPONDANCE}
+    with open(os.path.join(sortie, "attribution_pays_2026.json"), "w", encoding="utf-8") as fo:
+        json.dump(rapport, fo, ensure_ascii=False, indent=2)
+    print("attribution des pays 2026 :", rapport["niveau_pct_lignes"], flush=True)
+    return cel[["i", "j", "pays"]]
+
+
 def agreger(a):
     sortie = os.path.join(a.sortie, "monde")
     tables = frozenset(a.tables)
@@ -148,22 +185,20 @@ def agreger(a):
         _tables(con, src, sortie, nom, y, pannes_snpp, tables)
         print(f"[{i}/{len(groupes)}] {nom} : {len(f)} fichiers, {time.time() - t0:.0f} s", flush=True)
 
-    # 2026 World form files: country from the historical cell table, static mask for NRT rows
+    # 2026 World form files: country from table_pays_2026 (polygon, then history), static mask for NRT rows
     form = []
     for dem in P.DEMANDES_MONDE_2026:
         form += glob.glob(os.path.join(a.brut, "2026-formulaire", dem, "fire_*.csv"))
     deja = all(os.path.exists(os.path.join(sortie, t, "formulaire_2026.parquet")) for t in verifiees)
     if form and (a.annees is None or 2026 in a.annees) and not deja:
-        cel = pd.concat([pd.read_parquet(p) for p in glob.glob(os.path.join(sortie, "cellule", "*_202[3-5].parquet"))])
-        ref = (cel.groupby(["lat_c", "lon_c", "pays"])["n_vegetation"].sum().reset_index()
-               .sort_values("n_vegetation").drop_duplicates(["lat_c", "lon_c"], keep="last")[["lat_c", "lon_c", "pays"]])
-        con.register("ref_pays", ref)
+        con.execute("INSTALL h3 FROM community")
+        con.execute("LOAD h3")
+        con.register("ref_pays", table_pays_2026(con, a, form, sortie, pays_sql))
         con.register("masque", masque(sortie, {2023, 2024, 2025}))
         src = f"""SELECT r.* EXCLUDE (pays), coalesce(ref_pays.pays, 'inconnu') AS pays,
                     (r.typ IS NULL AND m.ilat IS NOT NULL) AS statique_estime
                   FROM ({_brut(form, "'?'")}) r
-                  LEFT JOIN ref_pays ON ref_pays.lat_c = floor(r.lat / {CELLULE}) * {CELLULE} + {CELLULE / 2}
-                                    AND ref_pays.lon_c = floor(r.lon / {CELLULE}) * {CELLULE} + {CELLULE / 2}
+                  LEFT JOIN ref_pays ON ref_pays.i = floor(r.lat / {A.PAS})::BIGINT AND ref_pays.j = floor(r.lon / {A.PAS})::BIGINT
                   LEFT JOIN masque m ON m.ilat = floor(r.lat / {CELLULE_MASQUE})::BIGINT AND m.ilon = floor(r.lon / {CELLULE_MASQUE})::BIGINT"""
         _tables(con, src, sortie, "formulaire_2026.parquet", None, pannes_snpp, tables)
         print(f"formulaire 2026 : {len(form)} fichiers, {time.time() - t0:.0f} s", flush=True)

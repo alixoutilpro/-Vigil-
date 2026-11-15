@@ -74,12 +74,15 @@ def sous_regions(C, frontieres):
     return cent
 
 
-def discordants(J, obs, seuil_z=3.5, min_total=20, min_jours=30):
-    """Per country, daytime days where log((SNPP+1)/(Aqua+1)) is a robust outlier (|z| > 3.5)."""
+def discordants(J, obs, seuil_z=3.5, min_total=20, min_jours=30, debut=DEBUT_CALIB, fin=FIN_CALIB):
+    """Per country, daytime days where log((SNPP+1)/(Aqua+1)) is a robust outlier (|z| > 3.5).
+    Median and MAD are computed on the calibration window only: the reference distribution is the regime being
+    calibrated (Aqua drifts after 2020-11), and k never changes when data outside the window change (audit 15/11)."""
     d = (J[J["daynight"] == "D"].pivot_table(index=["pays", "acq_date"], columns="satellite",
                                                values="n_vegetation", aggfunc="sum", fill_value=0))
     d = d.reset_index()
-    d = d[d["acq_date"].isin(obs["Aqua"]) & d["acq_date"].isin(obs["SNPP"])]
+    d = d[d["acq_date"].isin(obs["Aqua"]) & d["acq_date"].isin(obs["SNPP"])
+          & (d["acq_date"] >= pd.Timestamp(debut)) & (d["acq_date"] <= pd.Timestamp(fin))]
     d = d[(d.get("Aqua", 0) + d.get("SNPP", 0)) >= min_total].copy()
     d["lr"] = np.log((d["SNPP"] + 1) / (d["Aqua"] + 1))
     st = d.groupby("pays")["lr"].agg(med="median", n="size")
