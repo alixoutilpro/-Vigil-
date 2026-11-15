@@ -18,15 +18,13 @@ const GLOBE_R = 100; // radius of the Earth in SVG units
 const VIEW = 320; // half-size of the SVG canvas in SVG units
 const FADE_MS = 500;
 
-interface Orbit { id: string; label: string; rx: number; ry: number; tilt: number; dur: number; begin: number; hidePath?: boolean }
+interface Orbit { id: string; label: string; rx: number; ry: number; tilt: number; dur: number; begin: number }
 
 const ORBITS: Orbit[] = [
-  // Orbit 1 (tilt -8°): two satellites half-period apart (dur 26 s → 13 s offset)
-  { id: "terra",  label: "TERRA",   rx: 150, ry: 28, tilt: -8, dur: 26, begin:   0 },
-  { id: "snpp",   label: "SNPP",    rx: 150, ry: 28, tilt: -8, dur: 26, begin: -13, hidePath: true },
-  // Orbit 2 (tilt +10°): two satellites half-period apart (dur 34 s → 17 s offset)
-  { id: "noaa20", label: "NOAA-20", rx: 172, ry: 36, tilt: 10, dur: 34, begin: -13 },
-  { id: "noaa21", label: "NOAA-21", rx: 172, ry: 36, tilt: 10, dur: 34, begin:   4, hidePath: true },
+  { id: "terra",  label: "TERRA",   rx: 145, ry: 24, tilt: -14, dur: 34, begin:   0 },
+  { id: "noaa20", label: "NOAA-20", rx: 170, ry: 38, tilt:   6, dur: 50, begin: -11 },
+  { id: "snpp",   label: "SNPP",    rx: 158, ry: 46, tilt: -28, dur: 58, begin:  -5 },
+  { id: "noaa21", label: "NOAA-21", rx: 182, ry: 30, tilt:  22, dur: 42, begin: -18 },
 ];
 
 /* Ellipse as two arcs from the left end: first the near (lower) half, then the far (upper) half.
@@ -154,11 +152,6 @@ export default function OrbitOverlay(props: {
           <Defs />
           {ORBITS.map((o) => (
             <g key={o.id} transform={`rotate(${o.tilt})`}>
-              {!o.hidePath && <>
-                {/* far half: hidden where it crosses the Earth */}
-                <path d={farPath(o.rx, o.ry)} className="vo-orbit vo-orbit-far" mask="url(#vo-occlude)" />
-                <path d={nearPath(o.rx, o.ry)} className="vo-orbit vo-orbit-near" />
-              </>}
               <Satellite orbit={o} copy="far" />
               <Satellite orbit={o} copy="near" />
             </g>
@@ -185,7 +178,10 @@ function Satellite({ orbit: o, copy }: { orbit: Orbit; copy: "near" | "far" }) {
           <g>
             <animateTransform attributeName="transform" type="scale" values="0.9;1.06;0.9;0.74;0.9" keyTimes="0;0.25;0.5;0.75;1" calcMode="spline" keySplines={spline} {...timing} />
             <animate attributeName="opacity" values="0.95;1;0.95;0.7;0.95" keyTimes="0;0.25;0.5;0.75;1" calcMode="spline" keySplines={spline} {...timing} />
-            <use href="#vo-sat" />
+            <g>
+              <animateTransform attributeName="transform" type="rotate" values="0;22;0;-22;0" keyTimes="0;0.25;0.5;0.75;1" calcMode="spline" keySplines={spline} dur="13s" begin={`${o.begin}s`} repeatCount="indefinite" />
+              <use href="#vo-sat" />
+            </g>
           </g>
         </g>
         {/* Label: same motion without rotate, counter-rotated against the orbit tilt so it reads level. */}
