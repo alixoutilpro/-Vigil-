@@ -48,7 +48,8 @@ def _enregistrer_facteurs(con, K, rho, cle):
 
 def harmoniser_hex(con, chemin_hex, Kc, rho_c, Kf, rho_f):
     """Hex x month x country harmonized hotspots and FRP, computed in DuckDB (the world table does not fit pandas).
-    Same switch rule as the 0.25 deg map of `calibrer`: Aqua before the switch date, then S-NPP, NOAA-20 on days
+    Same switch rule as the 0.25 deg map of `calibrer`: Aqua before the switch date (converted S-NPP on Aqua outage
+    days), then S-NPP, NOAA-20 on days
     without S-NPP; k = country, else sub-region, else global day/night ratio (never silently 0)."""
     con.register("sr", Kc.drop_duplicates("pays")[["pays", "sous_region"]])
     _enregistrer_facteurs(con, Kc, rho_c, "c")
@@ -61,14 +62,17 @@ def harmoniser_hex(con, chemin_hex, Kc, rho_c, Kf, rho_f):
             LEFT JOIN ks_{c} ON ks_{c}.sous_region = sr.sous_region AND ks_{c}.daynight = h.daynight AND ks_{c}.mois = h.mois
             LEFT JOIN kg_{c} ON kg_{c}.daynight = h.daynight
             LEFT JOIN rho_{c} ON rho_{c}.daynight = h.daynight AND rho_{c}.mois = h.mois""" for c in ["c", "f"])
+    cols = {r[0] for r in con.sql(f"DESCRIBE SELECT * FROM read_parquet('{chemin_hex}', union_by_name=true)").fetchall()}
+    sans_aqua = "coalesce(jour_sans_aqua, false)" if "jour_sans_aqua" in cols else "false"   # tables written before the Aqua-outage fix
     con.execute(f"""CREATE OR REPLACE TABLE hp AS
         SELECT h.h3, h.annee, h.mois, h.pays,
                sum(u * ({fac('c')}) * h.n_vegetation) AS hotspots, sum(u * ({fac('f')}) * h.frp_vegetation) AS frp
         FROM (SELECT *, CASE
-                WHEN make_date(annee, mois, 1) < DATE '{BASCULE.date()}' THEN (satellite = 'Aqua')::INT
+                WHEN make_date(annee, mois, 1) < DATE '{BASCULE.date()}' THEN
+                     ((satellite = 'Aqua' AND NOT {sans_aqua}) OR (satellite = 'SNPP' AND {sans_aqua}))::INT
                 WHEN satellite = 'SNPP' THEN (NOT jour_sans_snpp)::INT
                 WHEN satellite = 'NOAA20' THEN jour_sans_snpp::INT ELSE 0 END AS u
-              FROM read_parquet('{chemin_hex}') WHERE satellite IN ('Aqua','SNPP','NOAA20') AND annee >= 2002) h
+              FROM read_parquet('{chemin_hex}', union_by_name=true) WHERE satellite IN ('Aqua','SNPP','NOAA20') AND annee >= 2002) h
         LEFT JOIN sr ON sr.pays = h.pays {jointures}
         GROUP BY ALL""")
 

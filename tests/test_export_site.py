@@ -54,3 +54,19 @@ def test_binary_records_round_trip(tmp_path):
     b = np.frombuffer(gzip.open(tmp_path / "m.bin.gz").read(), ENR_MOIS)
     assert ENR_MOIS.itemsize == 16 and ENR_TUILE.itemsize == 18
     assert int(b["h3"][0]) == HEX and b["hotspots"][1] == pytest.approx(2.5) and b["frp"][1] == pytest.approx(20.0)
+
+
+def test_aqua_outage_days_use_converted_snpp_before_the_switch(tmp_path):
+    """Before the switch, a day flagged 'without Aqua' takes k x S-NPP instead of the (partial) Aqua count."""
+    lignes = [("Greece", HEX, 2020, 8, "Aqua", "D", False, False, 10, 100.0),    # normal days: Aqua as observed
+              ("Greece", HEX, 2020, 8, "Aqua", "D", False, True, 1, 5.0),        # outage days: partial Aqua, ignored
+              ("Greece", HEX, 2020, 8, "SNPP", "D", False, False, 50, 300.0),    # normal days: VIIRS not used
+              ("Greece", HEX, 2020, 8, "SNPP", "D", False, True, 40, 200.0)]     # outage days: k x S-NPP
+    H = pd.DataFrame(lignes, columns=["pays", "h3", "annee", "mois", "satellite", "daynight", "jour_sans_snpp", "jour_sans_aqua",
+                                      "n_vegetation", "frp_vegetation"]).astype({"h3": "uint64"})
+    ch = str(tmp_path / "hex.parquet")
+    H.to_parquet(ch)
+    con = duckdb.connect()
+    harmoniser_hex(con, ch, _k(0.2), _rho(1.0), _k(0.5), _rho(1.0))
+    r = con.sql("SELECT sum(hotspots) h, sum(frp) f FROM hp").fetchall()[0]
+    assert r[0] == pytest.approx(10 + 0.2 * 40) and r[1] == pytest.approx(100 + 0.5 * 200)

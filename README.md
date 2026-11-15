@@ -68,14 +68,14 @@ Every step counts what it removes. The Greek funnel is in `Donnees-propres/grece
 |---|---|---|
 | Reference sensor | **MODIS Aqua** | The Terra/Aqua ratio drifts (Mann–Kendall p = 0.0003) |
 | Calibration window | **2012-02 → 2020-10** | Pettitt change point of the Aqua/S-NPP daytime ratio in 2020-11 (p = 0.006, regional study): Aqua orbit drift. The same test on the pooled world ratio is not conclusive (p = 0.17) and is not used as evidence |
-| Published value | Aqua **observed** before 2020-11, VIIRS **converted** after | A valid observation is never replaced by an estimate |
+| Published value | Aqua **observed** before 2020-11, VIIRS **converted** after | A valid observation is never replaced by an estimate. One exception: the Aqua outage of 16 Aug – 2 Sep 2020 (3–43 % of its usual detections) is filled with converted S-NPP, and left out of the calibration |
 | Estimator | ratio of totals k = ΣAqua / ΣVIIRS (Poisson maximum likelihood) | Unbiased; mean or median of ratios are biased by −9 % to −60 % |
 | Stratification | country × day/night × calendar month, gamma–Poisson shrinkage toward the sub-region (α = 30 for the world, chosen by cross-validation; the regional study of `docs/methode_k.md` found α = 10 on 5 countries) | Small countries borrow strength, large ones keep their own k |
 | NOAA-20 | chained to S-NPP (ρ = ΣS-NPP / ΣNOAA-20 per day/night × month, median ≈ 0.97); used on S-NPP outage days and after S-NPP's end (2 Nov 2026) | S-NPP and NOAA-20 are never summed (that would double-count fires) |
 | Uncertainty | split-conformal, Mondrian by size class, on log(1 + x) → 80 % and 95 % bands, never negative | Observed coverage 79.8 % (80 %) and 94.9 % (95 %) |
 | FRP | its own k (VIGIL-K1-FRP), same design | Reusing the count k for FRP would bias it by −75 % |
 
-### 2.3 Validation: leave-one-year-out, world, 235 countries, 20,235 country-months
+### 2.3 Validation: leave-one-year-out, world, 235 countries, 20,225 country-months
 
 Each year is predicted by a model that never saw it.
 
@@ -88,7 +88,7 @@ Each year is predicted by a model that never saw it.
 
 \* Anomalies = value minus the mean of the same month. This is the hard part: seasonality alone already gives a high plain R².
 
-Mean Poisson deviance 12.70; observed coverage of the bands 79.7 % (80 %) and 94.9 % (95 %).
+Mean Poisson deviance 12.47; observed coverage of the bands 79.8 % (80 %) and 94.9 % (95 %).
 
 Country reliability shown in the app (235 calibrated countries): 127 high, 24 medium, 84 low.
 

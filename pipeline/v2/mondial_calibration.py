@@ -263,8 +263,9 @@ def calibrer(a):
     av = w["acq_date"] < BASCULE
     o = {s: w["acq_date"].isin(obs[s]).to_numpy() for s in obs}
     sat = w["satellite"].to_numpy()
-    use = np.select([av & (sat == "Aqua") & o["Aqua"], ~av & (sat == "SNPP") & o["SNPP"],
-                     ~av & (sat == "NOAA20") & o["NOAA20"] & ~o["SNPP"]], [1.0, 1.0, 1.0], 0.0)
+    # before the switch: Aqua as observed; on Aqua outage days, converted S-NPP when it observes (never a hole when a sensor saw the fire)
+    use = np.select([av & (sat == "Aqua") & o["Aqua"], av & (sat == "SNPP") & o["SNPP"] & ~o["Aqua"], ~av & (sat == "SNPP") & o["SNPP"],
+                     ~av & (sat == "NOAA20") & o["NOAA20"] & ~o["SNPP"]], [1.0, 1.0, 1.0, 1.0], 0.0)
     fac = np.select([sat == "Aqua", sat == "SNPP", sat == "NOAA20"], [1.0, w["k"], w["k"] * w["rho"]], 0.0)
     w["valeur"] = use * fac * w["n_vegetation"]
     serie = w[w["annee"] >= 2002].groupby(["pays", "annee", "mois"])["valeur"].sum()
@@ -272,8 +273,9 @@ def calibrer(a):
     grille = pd.MultiIndex.from_tuples([(c, p.year, p.month) for c in sorted(set(serie.index.get_level_values(0)) - {"inconnu"})
                                         for p in mois_tous], names=["pays", "annee", "mois"])
     serie = serie.reindex(grille, fill_value=0.0).reset_index()          # no detection = observed 0
-    jours = pd.date_range(P.DEBUT_DONNEES_FIRMS["Aqua"], fin, freq="D")
-    ok = np.where(jours < BASCULE, jours.isin(obs["Aqua"]), jours.isin(obs["SNPP"]) | jours.isin(obs["NOAA20"]))
+    # share of the days of each month with data; the last month runs to its last calendar day (a partial month is < 1)
+    jours = pd.date_range(P.DEBUT_DONNEES_FIRMS["Aqua"], pd.Timestamp(fin) + pd.offsets.MonthEnd(0), freq="D")
+    ok = np.where(jours < BASCULE, jours.isin(obs["Aqua"]) | jours.isin(obs["SNPP"]), jours.isin(obs["SNPP"]) | jours.isin(obs["NOAA20"])) & (jours <= fin)
     cov = pd.Series(ok, index=jours).groupby([jours.year, jours.month]).mean().rename("couverture_jours")
     cov.index.names = ["annee", "mois"]
     serie = serie.join(cov, on=["annee", "mois"])
@@ -296,8 +298,9 @@ def calibrer(a):
     Cc = Cc.merge(rho, on=["daynight", "mois"], how="left")
     avc = pd.to_datetime(dict(year=Cc["annee"], month=Cc["mois"], day=1)) < BASCULE
     s = Cc["satellite"]
-    use = np.select([avc & (s == "Aqua"), ~avc & (s == "SNPP") & ~Cc["jour_sans_snpp"],
-                     ~avc & (s == "NOAA20") & Cc["jour_sans_snpp"]], [1.0, 1.0, 1.0], 0.0)
+    sans_aqua = (Cc["jour_sans_aqua"].fillna(False).astype(bool) if "jour_sans_aqua" in Cc else pd.Series(False, index=Cc.index)).to_numpy()
+    use = np.select([avc & (s == "Aqua") & ~sans_aqua, avc & (s == "SNPP") & sans_aqua, ~avc & (s == "SNPP") & ~Cc["jour_sans_snpp"],
+                     ~avc & (s == "NOAA20") & Cc["jour_sans_snpp"]], [1.0, 1.0, 1.0, 1.0], 0.0)
     fac = np.select([s == "Aqua", s == "SNPP", s == "NOAA20"], [1.0, Cc["k"], Cc["k"] * Cc["rho"]], 0.0)
     Cc["valeur"] = use * fac * Cc["n_vegetation"]
     carte = Cc.groupby(["lat_c", "lon_c", "pays", "annee", "mois"])["valeur"].sum().reset_index()

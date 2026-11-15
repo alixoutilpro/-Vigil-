@@ -85,7 +85,10 @@ def exporter(pays, sortie, site):
     f["harmonise"] = hf["frp_MW"].reindex(mois)
 
     # Aqua observed months (before the switch, from the first Aqua month): raw == harmonized, by construction
-    avant = (mois.to_timestamp() < BASCULE) & (mois >= pd.Period(P.DEBUT_DONNEES_FIRMS["Aqua"], "M"))
+    # months holding Aqua outage days filled with converted S-NPP are "mixed": raw and harmonized differ there on purpose
+    pannes = pd.to_datetime(jsd.loc[jsd["satellite"] == "Aqua", "date"])
+    mixtes = sorted({str(d.to_period("M")) for d in pannes if d < BASCULE and d in obs["SNPP"]})
+    avant = (mois.to_timestamp() < BASCULE) & (mois >= pd.Period(P.DEBUT_DONNEES_FIRMS["Aqua"], "M")) & ~mois.astype(str).isin(mixtes)
     ecart_n = float(np.nanmax(np.abs(n.loc[avant, "brut_2020"] - n.loc[avant, "harmonise"])))
     ecart_f = float(np.nanmax(np.abs(f.loc[avant, "brut_2020"] - f.loc[avant, "harmonise"])))
     assert ecart_n < 0.01 and ecart_f < 0.01, (ecart_n, ecart_f)

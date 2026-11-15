@@ -172,18 +172,19 @@ if (process.argv.includes("--greece")) {
   out.cell_2026_11 = S.cellAt(hot, 2026, 10);
   console.log(JSON.stringify(out, (k, v) => (k === "base" ? undefined : v), 1));
   if (Math.round(out.v2007_08) !== 1457) { fails++; console.error("FAIL Greece Aug 2007 != 1,457"); }
-  if (Math.round(out.v2023_08) !== 827) { fails++; console.error("FAIL Greece Aug 2023 != 827"); }
+  // 827 -> 842 on 15/11: the 18 days of the Aqua outage of Aug 2020 left the calibration, the Greek August k rose by 1.8 %
+  if (Math.round(out.v2023_08) !== 842) { fails++; console.error("FAIL Greece Aug 2023 != 842"); }
   // 71 -> 66 on 15/11: 2026 rows get their country from the Natural Earth polygon (pipeline/v2/attribution_pays.py)
   // instead of the 0.25 deg cell; Evros-border detections of the Turkish/Bulgarian side left Greece. PR and class unchanged.
   if (Math.round(out.v2026_10) !== 66) { fails++; console.error("FAIL Greece Oct 2026 != 66"); }
   // 2026 is not a baseline year: nothing is left out, n = 23 (lead audit 14/11: median 153.0, P10 46.50, P90 518.67, PR 26.1)
   if (Math.round(out.oct_loo_median_n[0]) !== 153 || out.oct_loo_median_n[1] !== 23) { fails++; console.error("FAIL Greece Oct 2026 baseline median != 153 (n=23)"); }
   const o = out.oct2026_vs_others;
-  if (Math.abs(o.pr - 26.087) > 0.01 || o.cls !== "below normal" || Math.abs(out.Oct.p10 - 46.5033) > 0.001 || Math.abs(out.Oct.p90 - 518.6667) > 0.001) { fails++; console.error("FAIL Greece Oct 2026 PR/class/P10/P90"); }
+  if (Math.abs(o.pr - 26.087) > 0.01 || o.cls !== "below normal" || Math.abs(out.Oct.p10 - 46.5) > 0.001 || Math.abs(out.Oct.p90 - 518.6667) > 0.001) { fails++; console.error("FAIL Greece Oct 2026 PR/class/P10/P90"); }
   // 2023 left out: n = 22, LOO median 137.965 (137.960 before 15/11: discordant days now judged on the calibration
   // window only, k moved by < 0.01 % here), PR 95.5, much above normal
   const a = out.aug2023_loo;
-  if (Math.abs(a.median - 137.965) > 1e-3 || a.base.length !== 22 || Math.abs(a.pr - 95.4545) > 0.01 || a.cls !== "much above normal") { fails++; console.error("FAIL Greece Aug 2023 LOO"); }
+  if (Math.abs(a.median - 139.02) > 1e-3 || a.base.length !== 22 || Math.abs(a.pr - 95.4545) > 0.01 || a.cls !== "much above normal") { fails++; console.error("FAIL Greece Aug 2023 LOO"); }
 }
 
 console.log(`${passes} passed, ${fails} failed`);

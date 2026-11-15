@@ -203,8 +203,9 @@ def serie_frp(J, K, rho, obs, fin, sr, q, val):
     av = (w["acq_date"] < BASCULE).to_numpy()
     o = {s: w["acq_date"].isin(obs[s]).to_numpy() for s in obs}
     sat = w["satellite"].to_numpy()
-    use = np.select([av & (sat == "Aqua") & o["Aqua"], ~av & (sat == "SNPP") & o["SNPP"],
-                     ~av & (sat == "NOAA20") & o["NOAA20"] & ~o["SNPP"]], [1.0, 1.0, 1.0], 0.0)
+    # before the switch: Aqua as observed; on Aqua outage days, converted S-NPP when it observes (never a hole when a sensor saw the fire)
+    use = np.select([av & (sat == "Aqua") & o["Aqua"], av & (sat == "SNPP") & o["SNPP"] & ~o["Aqua"], ~av & (sat == "SNPP") & o["SNPP"],
+                     ~av & (sat == "NOAA20") & o["NOAA20"] & ~o["SNPP"]], [1.0, 1.0, 1.0, 1.0], 0.0)
     fac = np.select([sat == "Aqua", sat == "SNPP", sat == "NOAA20"], [1.0, w["k"], w["k"] * w["rho"]], 0.0)
     w["frp_MW"] = use * np.nan_to_num(fac) * w["frp_vegetation"]
     s = w[(w["annee"] >= 2002) & (w["pays"] != "inconnu")].groupby(["pays", "annee", "mois"])["frp_MW"].sum()

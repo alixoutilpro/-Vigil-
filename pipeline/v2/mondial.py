@@ -63,7 +63,7 @@ def _brut(fichiers, pays_sql):
                AND dn IN ('D','N')) AS valide, {CONF_OK_SQL} AS conf_ok FROM n"""
 
 
-def _tables(con, source, sortie, nom, annee, pannes_snpp, tables=TABLES_HISTORIQUES):
+def _tables(con, source, sortie, nom, annee, pannes_snpp, tables=TABLES_HISTORIQUES, pannes_aqua="[]"):
     """From a normalized relation 'source', write the requested tables (see TABLES_HISTORIQUES / TABLES_H3_FRP)."""
     con.execute(f"CREATE OR REPLACE TEMP VIEW r AS {source}")
     if "hex" in tables:
@@ -72,6 +72,7 @@ def _tables(con, source, sortie, nom, annee, pannes_snpp, tables=TABLES_HISTORIQ
         con.execute(f"""COPY (SELECT pays, h3_latlng_to_cell(lat, lon, {H3_MONDE}) AS h3, year(d) AS annee, month(d) AS mois,
                 sat AS satellite, dn AS daynight,
                 (d > DATE '2026-11-02' OR d IN (SELECT unnest({pannes_snpp}::DATE[]))) AS jour_sans_snpp,
+                (d < DATE '2020-11-01' AND d IN (SELECT unnest({pannes_aqua}::DATE[]))) AS jour_sans_aqua,
                 count(*) FILTER (coalesce(typ, 0) = 0 AND NOT statique_estime) AS n_vegetation,
                 coalesce(sum(frp) FILTER (coalesce(typ, 0) = 0 AND NOT statique_estime), 0) AS frp_vegetation,
                 max(frp) FILTER (coalesce(typ, 0) = 0 AND NOT statique_estime) AS frp_max,
@@ -98,6 +99,7 @@ def _tables(con, source, sortie, nom, annee, pannes_snpp, tables=TABLES_HISTORIQ
             floor(lon / {CELLULE}) * {CELLULE} + {CELLULE / 2} AS lon_c, year(d) AS annee, month(d) AS mois,
             sat AS satellite, dn AS daynight,
             (d > DATE '2026-11-02' OR d IN (SELECT unnest({pannes_snpp}::DATE[]))) AS jour_sans_snpp,
+            (d < DATE '2020-11-01' AND d IN (SELECT unnest({pannes_aqua}::DATE[]))) AS jour_sans_aqua,
             count(*) FILTER (coalesce(typ, 0) = 0 AND NOT statique_estime) AS n_vegetation,
             count(*) FILTER (typ = 2 OR statique_estime) AS n_industriel
         FROM r WHERE valide AND conf_ok AND coalesce(typ, 0) IN (0, 2) GROUP BY ALL)
@@ -171,6 +173,8 @@ def agreger(a):
     con.execute(f"SET temp_directory='{os.path.join(sortie, 'tmp_duckdb')}'")
     jsd = pd.read_csv(os.path.join(os.path.dirname(__file__), P.FICHIER_JOURS_SANS_DONNEES))
     pannes_snpp = "[" + ",".join(f"'{d}'" for d in jsd.loc[jsd["satellite"] == "SNPP", "date"]) + "]"
+    # Aqua outage days before the switch: the published value uses converted S-NPP on those days (docs/methode_k.md, section 3)
+    pannes_aqua = "[" + ",".join(f"'{d}'" for d in jsd.loc[jsd["satellite"] == "Aqua", "date"]) + "]"
     pays_sql = r"regexp_extract(filename, '_[0-9]{4}_(.+)\.csv$', 1)"
     t0 = time.time()
     groupes = [(d, int(y)) for d in P.DOSSIERS_ANNUELS for y in sorted(os.listdir(os.path.join(a.brut, d)))
@@ -182,7 +186,7 @@ def agreger(a):
             continue
         f = glob.glob(os.path.join(a.brut, d, str(y), "*.csv"))
         src = f"SELECT *, false AS statique_estime FROM ({_brut(f, pays_sql)})"
-        _tables(con, src, sortie, nom, y, pannes_snpp, tables)
+        _tables(con, src, sortie, nom, y, pannes_snpp, tables, pannes_aqua)
         print(f"[{i}/{len(groupes)}] {nom} : {len(f)} fichiers, {time.time() - t0:.0f} s", flush=True)
 
     # 2026 World form files: country from table_pays_2026 (polygon, then history), static mask for NRT rows
@@ -200,7 +204,7 @@ def agreger(a):
                   FROM ({_brut(form, "'?'")}) r
                   LEFT JOIN ref_pays ON ref_pays.i = floor(r.lat / {A.PAS})::BIGINT AND ref_pays.j = floor(r.lon / {A.PAS})::BIGINT
                   LEFT JOIN masque m ON m.ilat = floor(r.lat / {CELLULE_MASQUE})::BIGINT AND m.ilon = floor(r.lon / {CELLULE_MASQUE})::BIGINT"""
-        _tables(con, src, sortie, "formulaire_2026.parquet", None, pannes_snpp, tables)
+        _tables(con, src, sortie, "formulaire_2026.parquet", None, pannes_snpp, tables, pannes_aqua)
         print(f"formulaire 2026 : {len(form)} fichiers, {time.time() - t0:.0f} s", flush=True)
     con.close()
     print(f"Agregation terminee en {time.time() - t0:.0f} s -> {sortie}")

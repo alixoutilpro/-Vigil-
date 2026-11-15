@@ -19,6 +19,8 @@ s'ajoute à l'historique Git (~100-200 Mo).
 
 - Avant le **1er novembre 2020** (`index.json → bascule_viirs`) : valeur **observée par MODIS Aqua** (`modis_observed`).
 - À partir de cette date : **VIIRS converti** (`viirs_converted`, S-NPP puis NOAA-20 les jours sans S-NPP) → afficher la fourchette.
+- **Mois mixtes août et septembre 2020** : Aqua MODIS est tombé en panne du 16 août au 2 septembre 2020 (3 à 43 % de ses détections habituelles). Sur ces 18 jours la valeur publiée est S-NPP converti (k), le reste du mois reste Aqua observé. Ces jours sont aussi sortis de la calibration de k (`pipeline/v2/jours_sans_donnees.csv`).
+- `couverture_jours` du dernier mois porte sur le mois civil entier : un mois en cours vaut moins de 1 (ex. 7 jours sur 30).
 - Libellé conseillé : « détections de feux actifs », pas « feux » (un feu = souvent plusieurs détections).
 
 ## 2. Fichiers

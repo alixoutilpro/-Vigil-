@@ -87,7 +87,7 @@ comparables. Environ un quart des hubs dépend du capteur.
 3. Un brûlage récurrent qui se décale de son mois habituel peut entrer comme sursaut.
 4. Le score **classe** les hubs entre eux sur 23 ans d'historique. Ce n'est ni une probabilité ni une prévision.
 5. Les mois convertis (depuis nov. 2020) portent l'incertitude de VIGIL-K1, non propagée dans le score.
-6. Les défauts connus des données sources s'appliquent (août 2020 sous-estimé par la panne d'Aqua, non corrigé).
+6. Panne d'Aqua d'août 2020 : corrigée dans les données sources (jours de panne remplacés par S-NPP converti, `docs/contrat_donnees_v2.md`).
 7. Les exclusions ne concernent que Vigil Trends : les cartes Analytics montrent encore volcans et torchères non étiquetés par FIRMS (les retirer impose de réagréger les fichiers bruts).
 8. ⚠️ Non traité : validation hors échantillon élargie des fourchettes de VIGIL-K1 (la couverture publiée est déjà calculée année par année, quantiles appris sans l'année testée, `mondial_calibration.py`) ; noms de pays différents entre `hubs.json` (Natural Earth) et `pays.json` (FIRMS) ; couverture du mois partiel dans `pays.json`.
 
