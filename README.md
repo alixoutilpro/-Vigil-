@@ -102,14 +102,55 @@ A hub is a place where real fire episodes recur. A hexagon-month is a "burst" wh
 
 ---
 
-## Toolbox
+## Resources used
 
-| Layer | Tools |
+Everything below is called by the code in this repository (versions from `package.json`, `requirements.txt`, `requirements-tf.txt`).
+
+### Data
+
+| Resource | Provider | Used for | Licence / terms |
+|---|---|---|---|
+| [FIRMS](https://firms.modaps.eosdis.nasa.gov) active fires: **MODIS Collection 6.1** (Terra + Aqua, 1 km) | NASA LANCE / ESDIS | Reference series (Aqua), 2000 → 2026 | NASA open data, citation requested (see *Credits*) |
+| FIRMS **VIIRS 375 m Collection 2**: S-NPP and NOAA-20 | NASA LANCE / ESDIS | Series to harmonize, 2012 → 2026 (archive + near real time) | NASA open data |
+| [Natural Earth](https://www.naturalearthdata.com) v5.1.2 admin-0 boundaries | Natural Earth | Country assignment of 2026 detections, zone search | Public domain |
+| [ESA WorldCover](https://esa-worldcover.org) 2021 v200, via [Microsoft Planetary Computer](https://planetarycomputer.microsoft.com) | ESA | Land cover of fire regimes (Vigil Trends), external validation | CC BY 4.0 |
+| [TerraClimate](https://www.climatologylab.org/terraclimate.html) (Abatzoglou et al. 2018), via Planetary Computer (Zarr) or the Climatology Lab THREDDS server | University of Idaho | Monthly climate of fire regimes (Vigil Trends) | CC0 |
+| [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/) (Terrarium format) | Mapzen / AWS Open Data | Elevation of hexagons (Vigil Trends) | Open, attribution to sources |
+| [Meteomatics Weather API](https://www.meteomatics.com) (optional) | Meteomatics | Monthly weather in the analyst dashboard | Commercial API, free tier, server-side keys |
+| [Esri World Imagery](https://www.arcgis.com/home/item.html?id=10df2279f9684e4a9f6a7f08febac2a9) + Reference layers | Esri, Maxar, Earthstar Geographics | Satellite basemap of the web app | Esri terms of use, attribution shown on the map |
+
+### Software: data pipeline (Python 3)
+
+| Library | Used for |
 |---|---|
-| Data | NASA FIRMS (MODIS C6.1; VIIRS 375 m C2: S-NPP, NOAA-20), Natural Earth v5.1.2, ESA WorldCover 2021 and TerraClimate (via Microsoft Planetary Computer), Meteomatics API (optional) |
-| Pipeline | Python, pandas, NumPy, DuckDB, PyArrow, H3, Shapely |
-| Statistics / ML | SciPy, scikit-learn, pytest |
-| Web | Next.js, React, TypeScript, MapLibre GL, h3-js, Recharts, Vercel |
+| [pandas](https://pandas.pydata.org) ≥ 2.2, [NumPy](https://numpy.org) | Tables, aggregation, all computations |
+| [DuckDB](https://duckdb.org) ≥ 1.1 | Fast SQL over 43 GB of FIRMS CSV |
+| [PyArrow](https://arrow.apache.org/docs/python/) | Parquet intermediate files |
+| [H3](https://h3geo.org) ≥ 4.0 (Uber) | Hexagonal grid (res 4–5) |
+| [Shapely](https://shapely.readthedocs.io) ≥ 2 | Point-in-polygon, country geometry |
+| [SciPy](https://scipy.org) | Statistical tests and distributions |
+| [scikit-learn](https://scikit-learn.org) ≥ 1.7 | k-means, ARI, silhouette, gradient boosting / Poisson regression (tested forecast) |
+| [numcodecs](https://numcodecs.readthedocs.io) | Decoding TerraClimate Zarr chunks (Blosc) |
+| [netCDF4](https://unidata.github.io/netcdf4-python/) | Reading TerraClimate over OPeNDAP |
+| [Pillow](https://python-pillow.org) | Decoding elevation tiles |
+| [pytest](https://pytest.org) | Unit tests (`tests/`) |
+
+### Software: web app
+
+| Library / service | Used for |
+|---|---|
+| [Next.js](https://nextjs.org) 15, [React](https://react.dev) 18, [TypeScript](https://www.typescriptlang.org) 5 | App framework, API route for weather |
+| [MapLibre GL JS](https://maplibre.org) 5 | Map, 3D globe, Gall-Peters equal-area projection (custom) |
+| [h3-js](https://github.com/uber/h3-js) 4.2.1 | Hexagons in the browser |
+| [Recharts](https://recharts.org) 2.15 | Charts of the dashboard |
+| [Vercel](https://vercel.com) | Hosting of the live app |
+| [GitHub](https://github.com) | Version control, collaboration |
+
+### Use of artificial intelligence
+
+We used **Claude Code (Anthropic)** as a coding assistant throughout the hackathon: writing and refactoring pipeline and front-end code, writing tests, and drafting documentation (commits co-written with it are marked `Co-Authored-By: Claude` in the git history). All scientific choices (reference sensor, calibration window, estimator, validation protocol) were made by the team and checked against the data, and every published number is reproducible with the commands in *Reproduce our numbers*. No AI-generated images, video or audio are used in the project.
+
+### Methods
 
 | Method | Used for | Why this one |
 |---|---|---|
