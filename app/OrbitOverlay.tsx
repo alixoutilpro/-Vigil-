@@ -4,7 +4,7 @@ import React, { useEffect, useRef } from "react";
 import type { Map as MLMap } from "maplibre-gl";
 
 /**
- * Decorative orbits (MODIS & VIIRS) drawn over the 3D globe while no region is selected.
+ * Decorative orbits (TERRA, NOAA-20, NOAA-21, SNPP) drawn over the 3D globe while no region is selected.
  *
  * - Pure SVG + native SMIL animation (animateMotion): no React re-render per frame, no WebGL work.
  * - The SVG is authored in a fixed space where the Earth is a circle of radius 100 at the origin;
@@ -18,11 +18,15 @@ const GLOBE_R = 100; // radius of the Earth in SVG units
 const VIEW = 320; // half-size of the SVG canvas in SVG units
 const FADE_MS = 500;
 
-interface Orbit { id: string; label: string; rx: number; ry: number; tilt: number; dur: number; begin: number }
+interface Orbit { id: string; label: string; rx: number; ry: number; tilt: number; dur: number; begin: number; hidePath?: boolean }
 
 const ORBITS: Orbit[] = [
-  { id: "modis", label: "MODIS", rx: 150, ry: 28, tilt: -8, dur: 26, begin: 0 },
-  { id: "viirs", label: "VIIRS", rx: 172, ry: 36, tilt: 10, dur: 34, begin: -13 },
+  // Orbit 1 (tilt -8°): two satellites half-period apart (dur 26 s → 13 s offset)
+  { id: "terra",  label: "TERRA",   rx: 150, ry: 28, tilt: -8, dur: 26, begin:   0 },
+  { id: "snpp",   label: "SNPP",    rx: 150, ry: 28, tilt: -8, dur: 26, begin: -13, hidePath: true },
+  // Orbit 2 (tilt +10°): two satellites half-period apart (dur 34 s → 17 s offset)
+  { id: "noaa20", label: "NOAA-20", rx: 172, ry: 36, tilt: 10, dur: 34, begin: -13 },
+  { id: "noaa21", label: "NOAA-21", rx: 172, ry: 36, tilt: 10, dur: 34, begin:   4, hidePath: true },
 ];
 
 /* Ellipse as two arcs from the left end: first the near (lower) half, then the far (upper) half.
@@ -150,9 +154,11 @@ export default function OrbitOverlay(props: {
           <Defs />
           {ORBITS.map((o) => (
             <g key={o.id} transform={`rotate(${o.tilt})`}>
-              {/* far half: hidden where it crosses the Earth */}
-              <path d={farPath(o.rx, o.ry)} className="vo-orbit vo-orbit-far" mask="url(#vo-occlude)" />
-              <path d={nearPath(o.rx, o.ry)} className="vo-orbit vo-orbit-near" />
+              {!o.hidePath && <>
+                {/* far half: hidden where it crosses the Earth */}
+                <path d={farPath(o.rx, o.ry)} className="vo-orbit vo-orbit-far" mask="url(#vo-occlude)" />
+                <path d={nearPath(o.rx, o.ry)} className="vo-orbit vo-orbit-near" />
+              </>}
               <Satellite orbit={o} copy="far" />
               <Satellite orbit={o} copy="near" />
             </g>
