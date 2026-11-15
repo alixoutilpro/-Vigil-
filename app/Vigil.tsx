@@ -1140,6 +1140,8 @@ export default function Vigil() {
   /** Gall-Peters warp currently applied to the map (tiles + data), see appliquerGeo. */
   const gpActifRef = useRef(false);
   const [resCarte, setResCarte] = useState(3); // H3 resolution drawn, follows the zoom (resPourZoom)
+  /** Density filter of the map: hexagons under class `seuilCarte` (0 = everything, 11 = only the top class) are hidden. */
+  const [seuilCarte, setSeuilCarte] = useState(0);
   /** Focus month picked in the dashboard calendar (kept only while it lies inside the study period). */
   const [focusPick, setFocusPick] = useState<{ y: number; m: number } | null>(null);
   /** The zone is being drawn from the dashboard: reopen it on the new zone (or on Esc). */
@@ -1732,6 +1734,13 @@ export default function Vigil() {
     if (m.getLayer("pts")) m.setPaintProperty("pts", "circle-color", ptsColorExpr() as never);
   };
   useEffect(() => { colorRef.current(); }, [metrique, resCarte, ready, daltonien]);
+  // Density threshold: a MapLibre filter on the colour value, so the data, the totals and the calendar are untouched
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m || !ready) return;
+    const f = seuilCarte > 0 ? [">=", ["get", "c"], DENS_BREAKS[metrique][seuilCarte - 1]] : null;
+    for (const id of ["hex", "hex-line"]) if (m.getLayer(id)) m.setFilter(id, f as never);
+  }, [seuilCarte, metrique, ready]);
 
 
   // 2D plan / 3D globe projection toggle, animated: the globe flattens into the plan, the plan wraps back.
@@ -2225,12 +2234,18 @@ export default function Vigil() {
           <div className="hd-mapkey-ramp" role="img" aria-label={`Colour scale: 12 classes from below ${DENS_BREAKS[metrique][0]} to ${DENS_BREAKS[metrique][10]} and more`}>
             {pal.hex.map((c, i) => {
               const br = DENS_BREAKS[metrique];
-              return <i key={i} style={{ background: c }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
+              return <i key={i} style={{ background: c, opacity: i < seuilCarte ? 0.18 : 1 }} title={i === 0 ? `< ${br[0]}` : i === br.length ? `≥ ${br[i - 1]}` : `${br[i - 1]} – ${br[i]}`} />;
             })}
           </div>
           <div className="hd-mapkey-ticks hd-mono" aria-hidden="true">
             {DENS_BREAKS[metrique].map((v, i) => (i % 2 === 0 ? <span key={v} style={{ left: `${((i + 1) * 100) / 12}%` }}>{v >= 1000 ? `${v / 1000}k` : v}</span> : null))}
           </div>
+          <label className="hd-mapkey-seuil" title="Drag to hide the hexagons under a density: the map only, totals and calendar keep every detection">
+            <input type="range" min={0} max={11} step={1} value={seuilCarte} onChange={(e) => setSeuilCarte(Number(e.target.value))}
+              aria-label="Hide hexagons under this density" aria-valuetext={seuilCarte ? `at least ${DENS_BREAKS[metrique][seuilCarte - 1]}` : "all densities"} />
+            <span className="hd-mono">{seuilCarte ? `≥ ${DENS_BREAKS[metrique][seuilCarte - 1]} shown` : "all shown"}</span>
+            {seuilCarte > 0 && <button onClick={() => setSeuilCarte(0)} aria-label="Show every density">×</button>}
+          </label>
           <div className="hd-mapkey-note">
             {metrique === "hotspots" ? "Detections (MODIS-Aqua eq.)" : "Σ FRP (MW)"} per 1,000 km² per month · H3 {TAILLE_RES[resCarte]}
             <span className="hd-mapkey-info" tabIndex={0} aria-label="How the colour classes are built">ⓘ
@@ -2704,6 +2719,11 @@ const CSS = PALETTE_CSS + `
 .hd-mapkey-info{position:relative;display:inline-block;margin-left:6px;cursor:help;color:var(--tx);font-weight:700;outline:none}
 .hd-mapkey-pop{display:none;position:absolute;left:-8px;bottom:calc(100% + 8px);width:300px;padding:9px 11px;border-radius:10px;background:rgba(15,23,42,.94);color:#f8fafc;font-size:11px;font-weight:400;line-height:1.45;box-shadow:0 10px 30px rgba(15,23,42,.3);z-index:20}
 .hd-mapkey-info:hover .hd-mapkey-pop,.hd-mapkey-info:focus .hd-mapkey-pop,.hd-mapkey-info:focus-within .hd-mapkey-pop{display:block}
+.hd-mapkey-seuil{display:flex;align-items:center;gap:8px;width:264px;font-size:10.5px}
+.hd-mapkey-seuil input{flex:1;min-width:0;height:14px;margin:0;accent-color:#0f172a;cursor:grab}
+.hd-mapkey-seuil input:active{cursor:grabbing}
+.hd-mapkey-seuil span{flex:0 0 auto;min-width:74px;text-align:right}
+.hd-mapkey-seuil button{border:0;background:rgba(15,23,42,.08);width:16px;height:16px;border-radius:50%;line-height:1;font-size:12px;padding:0}
 .hd-mapkey-pts{max-width:300px;line-height:1.5}
 .hd-mapkey-pts i{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 3px 0 4px;vertical-align:0;box-shadow:0 0 0 1px #0f172a}
 .hd-mapkey-pts i.hollow{background:transparent;box-shadow:0 0 0 1.2px #94a3b8}
