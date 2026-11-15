@@ -20,9 +20,13 @@
 
 ## Mission
 
-Fire managers plan with **burning calendars**: which months burn, and whether this season is normal. NASA's longest active-fire record, **MODIS** (since 2000), ends in 2027. Its successor **VIIRS** has 375 m pixels instead of 1 km, so it sees many more small fires. Spliced naively, the two records create a false surge, and ~10 years of history stop being comparable with today.
+The mission is to build a great interactive web app that fixes a major flaw in 25 years of NASA wildfire archives. If you plot raw NASA fire data from 2003 to today, it looks like global fires suddenly doubled in 2012, due to the fact that NASA switched from MODIS satellites (1km resolution) to VIIRS (375m resolution).
 
-**Vigil** converts every VIIRS detection into a **MODIS-Aqua-equivalent** count with a calibrated uncertainty band, and serves one consistent series in a web app: pick a zone and a period, and see its calendar, its anomalies, and how this month compares with 2003–2025.
+To address this, we developed a regression model that calibrates VIIRS detections back to a MODIS-Aqua baseline, flattening the 2012 jump into one continuous historical record.
+
+Inside the app, users can move seamlessly from national 25-year trends down to local 17km H3 hexagonal cells. Because wildfire data is heavily skewed by catastrophic years, Vigil anchors its baselines on medians, IQRs, and $P_{10}$–$P_{90}$ bands rather than averages—making real anomalies immediately obvious ! It can also separate raw hotspot counts from Fire Radiative Power (MW), letting anyone distinguish a destructive forest megafire from routine agricultural brush burning.
+
+This app could be truly useful for scientists, emergency planners, insurers, and governments who need to spot real climate anomalies and assess wildfire risk for critical infrastructure - basically anyone making high-stakes decisions around wildfire risk !
 
 ---
 
