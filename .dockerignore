@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.env
+.env.*
+*.local
+data/raw
+data/clean
+data/weather-cache*
+**/__pycache__
+tests
+*.zip
